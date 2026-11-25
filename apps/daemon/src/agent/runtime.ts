@@ -332,7 +332,7 @@ export class AgentRuntime {
       if (this.#mcp) {
         const creation = (await this.journal.commands(this.sessionId)).find(command => command.isCanonical && (command.method === "_deskfleet/session/create" || command.method === "_deskfleet/session/fork"))
         if (!creation) throw new Error("This Session has no initiating command for MCP delegation")
-        this.#mcpLease = this.#mcp.lease(this.sessionId, snapshot.session.workspaceId, creation.actor, !!snapshot.session.superAgent)
+        this.#mcpLease = this.#mcp.lease(this.sessionId, snapshot.session.workspaceId, creation.actor, !!snapshot.session.superAgent, creation.operationId)
         for (const server of this.#mcpLease.servers) {
           if ("type" in server && !capabilities?.mcpCapabilities?.[server.type]) {
             throw new Error(`This Agent does not support the ${server.type.toUpperCase()} transport required by MCP server "${server.name}". Change or disable that server in MCP Servers settings.`)
