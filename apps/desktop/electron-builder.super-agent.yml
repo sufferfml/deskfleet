@@ -1,0 +1,14 @@
+extends: ./electron-builder.yml
+appId: io.github.yet-another-ai.deskfleet.workspace-agent
+productName: DeskFleet SA
+executableName: deskfleet-workspace-agent
+extraMetadata:
+  name: deskfleet-workspace-agent
+  # Electron uses this existing name for userData and Keychain Safe Storage.
+  productName: DeskFleet Workspace Agent
+artifactName: "DeskFleet-SA-${version}-${os}-${arch}.${ext}"
+publish: null
+mac:
+  type: distribution
+  forceCodeSigning: true
+  notarize: false
