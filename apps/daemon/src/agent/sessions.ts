@@ -221,6 +221,10 @@ export class AgentSessions {
     return this.#catalog.attachments.draftDirectory(draftId)
   }
 
+  fileGrant(userId: string, path: string): string {
+    return this.#catalog.attachments.fileGrant(userId, path)
+  }
+
   async requireActive(sessionId: string): Promise<AgentSnapshot> {
     const snapshot = await this.journal.read(sessionId)
     requireActiveSession(snapshot.session)
