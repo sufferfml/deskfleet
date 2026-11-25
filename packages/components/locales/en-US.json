@@ -689,6 +689,8 @@
     "dark": "Dark",
     "preview": "Live preview",
     "defaultFont": "System default",
+    "textSize": "Text size",
+    "defaultTextSize": "100% (default)",
     "interfaceFont": "Interface font",
     "terminalFont": "Terminal font",
     "fontHint": "Use an installed font. Leave blank for the default.",

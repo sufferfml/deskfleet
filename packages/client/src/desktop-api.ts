@@ -33,6 +33,8 @@ export interface DeskfleetDesktopApi {
   siteAdministration?: SiteAdministrationApi
   onboarding?: OnboardingApi
   appearance?: AppearanceApi
+  /** Device-local text zoom hook exposed by mobile hosts that support interface text scaling. */
+  setInterfaceTextScale?: (percent: number) => void
   applications?: LocalApplicationsApi
   updates?: UpdateApi
   windowsDesktopService?: WindowsDesktopServiceApi

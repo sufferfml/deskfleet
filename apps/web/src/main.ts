@@ -39,6 +39,9 @@ if (Capacitor.isNativePlatform()) {
   adapter.openExternal = url => DeskFleetBridge.openExternal({ url })
 }
 if (Capacitor.getPlatform() === "ios") {
+  adapter.setInterfaceTextScale = percent => {
+    document.documentElement.style.setProperty("-webkit-text-size-adjust", `${percent}%`)
+  }
   adapter.outlineAudio = createCapacitorOutlineAudioApi()
 }
 if (Capacitor.isNativePlatform() && adapter.central) {

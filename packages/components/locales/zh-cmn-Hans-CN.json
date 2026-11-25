@@ -689,6 +689,8 @@
     "dark": "深色",
     "preview": "实时预览",
     "defaultFont": "系统默认",
+    "textSize": "字体大小",
+    "defaultTextSize": "100%（默认）",
     "interfaceFont": "界面字体",
     "terminalFont": "终端字体",
     "fontHint": "使用已安装的字体，留空恢复默认。",

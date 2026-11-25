@@ -582,7 +582,7 @@
     "resetThemeColor": "デフォルトに戻す",
     "followSystem": "システム設定に合わせる", "light": "ライト",
     "dark": "ダーク", "preview": "ライブプレビュー",
-    "defaultFont": "システムのデフォルト", "interfaceFont": "インターフェースのフォント",
+    "defaultFont": "システムのデフォルト", "textSize": "文字サイズ", "defaultTextSize": "100%（標準）", "interfaceFont": "インターフェースのフォント",
     "terminalFont": "ターミナルのフォント", "fontHint": "インストール済みのフォントを指定してください。空欄の場合はデフォルトを使用します。",
     "terminalFontHint": "CSS の代替フォントを指定できます（例: \"Cascadia Code\", monospace）。空欄の場合はデフォルトを使用します。", "interfacePreview": "The quick brown fox. こんにちは、世界。",
     "terminalPreview": "ターミナルのプレビュー", "ligatures": "フォントの合字",
