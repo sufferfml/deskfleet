@@ -18,6 +18,7 @@ export type ScheduleRunEvidenceStatus =
   | "concluded"
   | "in_progress"
   | "progress_only_no_conclusion"
+  | "incomplete"
   | "no_output"
   | "failed"
   | "interrupted"
@@ -50,13 +51,13 @@ export interface ScheduleRunEvidence {
   error?: string
 }
 
-const PLACEHOLDER_SUMMARY_RE = /^(?:Running scheduled task "|".*" finished \([^)]+\) while SA (?:follow-up|background follow-up) .*; not pushed to main chat\.|Run completed with no text output\.|".*" finished, but only (?:an opening acknowledgement|progress commentary) was recorded|".*" finished with only an intermediate milestone|This turn includes input from another member|".*" finished, but its execution session was deleted)/u
+const PLACEHOLDER_SUMMARY_RE = /^(?:Running scheduled task "|".*" finished \([^)]+\) while SA (?:follow-up|background follow-up) .*; not pushed to main chat\.|Run completed with no text output\.|".*" finished, but only (?:an opening acknowledgement|progress commentary) was recorded|".*" finished with only an intermediate milestone|This turn includes input from another member|".*" finished, but its execution session was deleted|Partial output captured for "|".*" finished, but its full turn transcript could not be read completely)/u
 
 function isSubstantivePersistedSummary(run: FollowUpRunRecord): boolean {
   const summary = run.summary.trim()
   if (!summary) return false
   if (run.status === "claimed" || run.status === "running") return false
-  if (run.evidenceAvailability === "restricted" || run.evidenceAvailability === "deleted") return false
+  if (run.evidenceAvailability === "restricted" || run.evidenceAvailability === "deleted" || run.evidenceAvailability === "partial") return false
   return !PLACEHOLDER_SUMMARY_RE.test(summary)
 }
 
@@ -303,7 +304,7 @@ export async function inspectScheduleRunsWithEvidence(params: {
     })
     const pendingAttention = pendingTurnAttention(snapshot, turn.id)
     const progress = describeTurnProgress(read, pendingAttention)
-    const availability: FollowUpEvidenceAvailability = !read.complete && baseAvailability === "available" ? "partial" : baseAvailability
+    const availability: FollowUpEvidenceAvailability = !read.complete ? "partial" : baseAvailability
 
     if (activeTurn(turn) || status === "claimed" || status === "running") {
       results.push({
@@ -348,6 +349,33 @@ export async function inspectScheduleRunsWithEvidence(params: {
         ...(progress ? { progress } : {}),
         ...(read.recentTools?.length ? { recentTools: read.recentTools } : {}),
         error: error ?? turn.error ?? (turn.state === "cancelled" ? "Scheduled turn was cancelled." : "Scheduled execution did not complete."),
+        summarySource: "run_turn_evidence",
+      })
+      continue
+    }
+
+    // Completed turn with incomplete transcript: never fabricate a confirmed conclusion from partial evidence (D4b).
+    if (!read.complete) {
+      const partialSnippet = read.text.trim() ? read.text.trim().slice(0, 1200) : undefined
+      const incompleteProgress = [progress, partialSnippet ? `Partial output excerpt: ${partialSnippet}` : undefined].filter(Boolean).join(" · ") || undefined
+      results.push({
+        runId: candidate.runId,
+        scheduleId: task.id,
+        scheduleTitle: task.title,
+        status: "completed",
+        startedAt,
+        ...(finishedAt || turn.endedAt ? { finishedAt: finishedAt ?? turn.endedAt } : {}),
+        ...(scheduledFor ? { scheduledFor } : {}),
+        sessionId,
+        ...(inputId ? { inputId } : {}),
+        turnId: turn.id,
+        ...(deliveryPolicy ? { deliveryPolicy } : {}),
+        deliveredToMainChat,
+        evidenceAvailability: "partial",
+        evidenceStatus: "incomplete",
+        ...(incompleteProgress ? { progress: incompleteProgress } : {}),
+        ...(read.recentTools?.length ? { recentTools: read.recentTools } : {}),
+        error: "Full turn transcript could not be read completely; no confirmed final conclusion is available.",
         summarySource: "run_turn_evidence",
       })
       continue
@@ -436,6 +464,9 @@ export function formatRunEvidenceLine(item: ScheduleRunEvidence): string {
   }
   if (item.evidenceStatus === "progress_only_no_conclusion") {
     return `${header} [Finished — progress only, no final conclusion]: ${item.progress ?? "Only intermediate progress was recorded."}`
+  }
+  if (item.evidenceStatus === "incomplete") {
+    return `${header} [Incomplete evidence — no confirmed conclusion]: ${item.error ?? "Full turn transcript could not be read completely."}${item.progress ? ` (${item.progress})` : ""}`
   }
   if (item.evidenceStatus === "failed" || item.evidenceStatus === "interrupted" || item.evidenceStatus === "skipped") {
     return `${header}: ${item.error ?? item.status}${item.progress ? ` (${item.progress})` : ""}`
