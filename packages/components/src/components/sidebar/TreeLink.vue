@@ -6,6 +6,7 @@ import { useAccountSession } from "../../composables/useAccountSession.ts"
 const props = defineProps<{
   to: RouteLocationRaw
   machineId?: string
+  compact?: boolean
   icon?: Component
   label: string
   dragSource?: HTMLAttributes
@@ -33,9 +34,9 @@ function open(event: MouseEvent, navigate: (event?: MouseEvent) => unknown): voi
       v-slot="{ href, navigate, isActive, isExactActive }"
       custom
     >
-      <a v-bind="dragSource" :href="href" class="ui-nav-item pr-2.5" :class="[indent[depth], selected && isActive ? 'ui-nav-active group-hover:bg-ui-accent/20' : 'group-hover:bg-ui-hover']" :aria-current="selected && isExactActive ? 'page' : undefined" @click="open($event, navigate)">
+      <a v-bind="dragSource" :href="href" class="ui-nav-item" :title="compact ? label : undefined" :class="[compact ? 'h-7 w-7 justify-center' : [indent[depth], 'pr-2.5'], selected && isActive ? 'ui-nav-active group-hover:bg-ui-accent/20' : 'group-hover:bg-ui-hover']" :aria-current="selected && isExactActive ? 'page' : undefined" @click="open($event, navigate)">
         <slot name="icon"><component v-if="icon" :is="icon" :size="15" :stroke-width="1.75" class="shrink-0" aria-hidden="true" /></slot>
-        <span class="min-w-0 flex-1 truncate">{{ label }}</span>
+        <span :class="compact ? 'sr-only' : 'min-w-0 flex-1 truncate'">{{ label }}</span>
         <span v-if="$slots.trailing || $slots.actions" class="inline-flex min-w-3.5 shrink-0 items-center justify-center gap-1.5 ui-motion" :class="$slots.actions && 'group-hover:op-0 group-focus-within:op-0'">
           <slot name="trailing" />
         </span>

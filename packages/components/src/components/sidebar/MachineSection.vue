@@ -1,22 +1,26 @@
 <script setup lang="ts">
 import {
   Archive,
+  Bot,
   ChevronRight,
   Folder,
   FolderOpen,
   FolderPlus,
   LocateFixed,
   MonitorPlay,
+  Plus,
   SquarePen,
   SquareTerminal,
   Unplug,
 } from "@lucide/vue"
+import { computedAsync } from "@vueuse/core"
 import { computed, onBeforeUnmount, ref, watch, watchEffect } from "vue"
 import { CollapsibleContent, CollapsibleRoot, CollapsibleTrigger } from "reka-ui"
 import { useI18n } from "vue-i18n"
 import { useRoute, useRouter, type RouteLocationRaw } from "vue-router"
 import { intlLocale, type AppLocale } from "@deskfleet/client/i18n"
 import type { AgentSessionSummary, MachineSummary, WorkspaceSummary } from "../../stores/fleet-types.ts"
+import { usePlatformClient } from "../../composables/usePlatformClient.ts"
 import { useSessionLabel } from "../../composables/useSessionLabel.ts"
 import { useAccountSession } from "../../composables/useAccountSession.ts"
 import { useMachineRuntimes } from "../../composables/useMachineRuntimes.ts"
@@ -31,12 +35,14 @@ import WorkspaceContextMenu from "../catalog/WorkspaceContextMenu.vue"
 import SessionContextMenu from "../session/SessionContextMenu.vue"
 import { sessionIsUnread, type SessionActivity } from "../../services/agent-conversation.ts"
 import { compareSessionsByRecency } from "../../services/session-preview.ts"
+import { isPrivateAgentWorkspace, usesWorkspaceNavigation, workspaceAgentRoute, workspaceSessionRoute } from "../../services/workspace-agent-navigation.ts"
 import SessionHoverTooltip from "./SessionHoverTooltip.vue"
 import SessionUnreadIndicator from "./SessionUnreadIndicator.vue"
 import SessionWorkingIndicator from "./SessionWorkingIndicator.vue"
 import SessionPullRequestIndicators from "./SessionPullRequestIndicators.vue"
 import MachineBatteryIndicator from "./MachineBatteryIndicator.vue"
 import SidebarReorderRow from "./SidebarReorderRow.vue"
+import SidebarSessionRow from "./SidebarSessionRow.vue"
 import TreeLink from "./TreeLink.vue"
 
 type SessionIndicatorState = SessionActivity | "archiving"
@@ -52,6 +58,17 @@ const terminals = useTerminalsStore()
 const route = useRoute()
 const router = useRouter()
 const account = useAccountSession()
+const client = usePlatformClient()
+const projectHome = computed(() => usesWorkspaceNavigation(client, !!account))
+const duplicateMachine = computed(() => projectHome.value && account?.machines?.value.some(other => other.id !== props.machine.id && other.name === props.machine.name))
+const looseSessionsOpen = ref(false)
+
+function sessionRoute(sessionId: string, workspaceId: string | null) {
+  return projectHome.value ? workspaceSessionRoute(props.machine.id, workspaceId, sessionId, account?.teamId.value) : { name: "session", params: { sessionId } }
+}
+function openWorkspace(workspaceId: string): void {
+  openRoute(workspaceAgentRoute(props.machine.id, workspaceId, account?.teamId.value))
+}
 const runtimes = useMachineRuntimes()
 const sidebarFilter = useSidebarFilter()
 const sidebarOrder = useSidebarOrder()
@@ -63,18 +80,48 @@ const openingTerminal = ref(false)
 const terminalError = ref<{ workspaceId: string; message: string } | null>(null)
 const expandedGroups = ref(new Set<string>())
 
+const visibleSession = (s: AgentSessionSummary) => s.archiveState === "active" || s.archiveState === "archiving"
 const activeOnly = (items: readonly AgentSessionSummary[], workspaceId?: string) => sidebarOrder.ordered(
   sessionGroup(workspaceId),
-  items.filter(s => s.archiveState === "active" || s.archiveState === "archiving").sort(compareSessionsByRecency),
+  items.filter(visibleSession).sort(compareSessionsByRecency),
 )
 
 // Catalog-only entries can belong to archived Sessions; wait for their metadata.
 const activeMachineSessions = computed(() => activeOnly(props.machine.sessions))
-const workspaceItems = computed(() => sidebarOrder.ordered(workspaceGroup.value, props.machine.workspaces))
+const defaultOwner = computedAsync(async () => {
+  const userId = account?.account?.value.user?.id
+  if (!projectHome.value || !userId) return
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(userId))
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("")
+})
+const defaultSessions = computed(() => {
+  if (!defaultOwner.value) return []
+  const workspace = props.machine.workspaces.find(item => isPrivateAgentWorkspace(item)
+    && item.directories[0]?.path.split(/[\\/]/u).filter(Boolean).at(-1) === defaultOwner.value)
+  return workspace?.sessions.filter(visibleSession) ?? []
+})
+const newProject = computed(() => {
+  const currentProject = route.name === "workspace-agent" && (!account || account.machineId.value === props.machine.id)
+    ? route.params.workspaceId : undefined
+  return { name: "new-project", query: { machine: props.machine.id, ...(account?.teamId.value && { team: account.teamId.value }), ...(typeof currentProject === "string" && { fromProject: currentProject }) } }
+})
+const workspaceItems = computed(() => sidebarOrder.ordered(
+  workspaceGroup.value,
+  props.machine.workspaces.filter(workspace => !projectHome.value || !isPrivateAgentWorkspace(workspace)),
+))
 const activeWorkspaces = computed(() => workspaceItems.value.map(workspace => ({
   ...workspace,
   allSessions: activeOnly(workspace.sessions, workspace.id),
 })))
+const repeatedNames = computed(() => {
+  const seen = new Set<string>()
+  const duplicates = new Set<string>()
+  if (projectHome.value) for (const { name } of workspaceItems.value) {
+    if (seen.has(name)) duplicates.add(name)
+    seen.add(name)
+  }
+  return duplicates
+})
 
 const sessionIndicator = (session: { id: string; archiveState?: string }): SessionIndicatorState | false =>
   session.archiveState === "archiving" ? "archiving" : agents.isWorking(session.id)
@@ -129,7 +176,8 @@ function openRoute(destination: RouteLocationRaw): void {
 
 function workspaceCreated(id: string): void {
   addingWorkspace.value = false
-  startSession(id)
+  if (projectHome.value) openWorkspace(id)
+  else startSession(id)
 }
 
 function startSession(workspaceId: string): void {
@@ -187,7 +235,7 @@ function sessionsIndicator(items: readonly { id: string; archiveState?: string }
 const machineIndicator = computed(() => {
   if (!collapsed.value) return false
   return sessionsIndicator([
-    ...activeMachineSessions.value,
+    ...activeMachineSessions.value, ...defaultSessions.value,
     ...activeWorkspaces.value.flatMap(workspace => workspace.allSessions),
   ])
 })
@@ -201,7 +249,8 @@ const machineIndicator = computed(() => {
         type="button"
         class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left text-[13px] font-medium text-ui-text-muted ui-motion hover:text-ui-text"
       >
-        <span class="truncate">{{ machine.name }}</span>
+        <span class="truncate" :title="duplicateMachine ? machine.name + ' #' + machine.id : undefined">{{ machine.name }}</span>
+        <small v-if="duplicateMachine" class="shrink-0 text-xs text-ui-text-muted">#{{ machine.id }}</small>
         <span v-if="machine.local" class="inline-flex shrink-0 items-center text-ui-text-muted" :title="t('machine.local')">
           <LocateFixed :size="14" :stroke-width="1.75" aria-hidden="true" />
           <span class="sr-only">{{ t("machine.local") }}</span>
@@ -218,13 +267,72 @@ const machineIndicator = computed(() => {
         <SessionWorkingIndicator v-if="machineIndicator" :state="machineIndicator" />
         <ChevronRight v-if="collapsed" :size="14" class="shrink-0" aria-hidden="true" />
       </CollapsibleTrigger>
-      <div v-if="machine.online" class="flex op-0 ui-motion group-hover:op-100 group-focus-within:op-100">
+      <UiButton v-if="projectHome" data-new-project variant="ghost" size="icon" :title="t('superAgent.newProject')" :aria-label="t('superAgent.newProject')" :disabled="!machine.online" @click="openRoute(newProject)">
+        <Plus :size="16" :stroke-width="1.75" aria-hidden="true" />
+      </UiButton>
+      <TreeLink v-if="projectHome" :machine-id="machine.id" :to="{ name: 'machine-control', params: { machineId: machine.id } }"
+        :icon="machine.local ? SquareTerminal : MonitorPlay" :label="t(machine.local ? 'machine.localControl' : 'machine.remoteControl')" :depth="0" compact />
+      <div v-if="machine.online && !projectHome" class="flex op-0 ui-motion group-hover:op-100 group-focus-within:op-100">
         <UiButton variant="ghost" size="icon" :label="t('machine.addWorkspace')" :placeholder="false" :disabled="unopened || !fleet.canManageCatalog" @click="addingWorkspace = true"><FolderPlus :size="16" :stroke-width="1.75" aria-hidden="true" /></UiButton>
       </div>
     </SidebarReorderRow>
     <WorkspaceCreateDialog v-if="addingWorkspace" @created="workspaceCreated" @cancel="addingWorkspace = false" />
 
     <CollapsibleContent as="ul" class="mt-1 flex flex-col gap-1">
+      <template v-if="projectHome">
+        <CollapsibleRoot v-slot="{ open }" as="li" data-default-workspace :default-open="false">
+          <div class="ui-nav-item relative pr-1" :class="route.name === 'new-session' && (!account || account.machineId.value === machine.id) && 'ui-nav-active'">
+            <button type="button" class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2.5 pl-2.5 text-left" @click="openRoute(workspaceAgentRoute(machine.id, null, account?.teamId.value))">
+              <Bot :size="15" class="shrink-0" aria-hidden="true" /><span class="truncate">{{ t("superAgent.defaultWorkspace") }}</span>
+            </button>
+            <CollapsibleTrigger v-if="defaultSessions.length" type="button" :aria-label="t('superAgent.toggleSessions', { name: t('superAgent.defaultWorkspace') })" class="grid h-7 w-7 shrink-0 cursor-pointer place-items-center rounded hover:bg-ui-hover">
+              <ChevronRight :size="15" :class="open && 'rotate-90'" aria-hidden="true" />
+            </CollapsibleTrigger>
+          </div>
+          <CollapsibleContent as="ul" class="flex flex-col gap-1 empty:hidden">
+            <li v-for="session in defaultSessions" :key="session.id">
+              <SidebarSessionRow :machine-id="machine.id" :session="session" :online="machine.online" :depth="1" project-worker :to="sessionRoute(session.id, null)" />
+            </li>
+          </CollapsibleContent>
+        </CollapsibleRoot>
+        <CollapsibleRoot v-for="workspace in workspaces" :key="workspace.id" v-slot="{ open }" as="li" :data-project-workspace="workspace.id" :default-open="false" class="flex flex-col gap-1">
+          <WorkspaceContextMenu :workspace-id="workspace.id" :machine-id="machine.id" :name="workspace.name" :directories="workspace.directories" :disabled="!machine.online || !fleet.canManageCatalog">
+            <div class="workspace-row ui-nav-item relative" :class="route.name === 'workspace-agent' && route.params.workspaceId === workspace.id && (!account || account.machineId.value === machine.id) && 'ui-nav-active'">
+              <button type="button" data-open-project :title="workspace.directories[0]?.path" class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2.5 pl-2.5 text-left" @click="openWorkspace(workspace.id)">
+                <Bot :size="15" class="shrink-0" aria-hidden="true" />
+                <span class="truncate">{{ workspace.name }}</span>
+                <span v-if="repeatedNames.has(workspace.name)" class="shrink-0 pr-1 text-xs text-ui-text-muted">#{{ workspace.id }}</span>
+                <SessionWorkingIndicator v-if="!open && sessionsIndicator(workspace.sessions)" :state="sessionsIndicator(workspace.sessions)" />
+                <SessionUnreadIndicator v-else-if="!open && workspace.sessions.some(sessionIsUnread)" />
+              </button>
+              <div class="workspace-actions flex shrink-0 items-center pr-1">
+                <UiButton variant="ghost" size="icon" :label="t('workspace.openDefaultTerminal')" class="text-inherit enabled:hover:bg-transparent enabled:hover:text-inherit" :disabled="!machine.online || openingTerminal || workspace.directories.length === 0" @click="openTerminal(workspace)"><SquareTerminal :size="16" :stroke-width="1.75" aria-hidden="true" /></UiButton>
+              </div>
+              <CollapsibleTrigger type="button" :aria-label="t('superAgent.toggleSessions', { name: repeatedNames.has(workspace.name) ? `${workspace.name} #${workspace.id}` : workspace.name })" class="mr-1 grid h-7 w-7 shrink-0 cursor-pointer place-items-center rounded hover:bg-ui-hover">
+                <ChevronRight :size="15" :class="open && 'rotate-90'" aria-hidden="true" />
+              </CollapsibleTrigger>
+            </div>
+          </WorkspaceContextMenu>
+          <p v-if="terminalError?.workspaceId === workspace.id" role="alert" class="m-0 break-words px-2.5 text-xs text-ui-danger">{{ terminalError.message }}</p>
+          <CollapsibleContent as="ul" class="flex flex-col gap-1 empty:hidden">
+            <li v-for="terminal in workspace.terminals" :key="terminal.id">
+              <TreeLink :machine-id="machine.id" :to="terminalLink(terminal.id)" :icon="SquareTerminal" :label="terminal.title" :depth="1" />
+            </li>
+            <li v-for="session in workspace.sessions" :key="session.id">
+              <SidebarSessionRow :machine-id="machine.id" :session="session" :online="machine.online" :depth="1" project-worker :to="sessionRoute(session.id, workspace.id)" />
+            </li>
+          </CollapsibleContent>
+        </CollapsibleRoot>
+        <li v-if="sessions.length">
+          <button type="button" data-unassigned-sessions class="ui-nav-item w-full px-2.5 text-left" :aria-expanded="looseSessionsOpen" @click="looseSessionsOpen = !looseSessionsOpen">
+            <ChevronRight :size="15" :class="looseSessionsOpen && 'rotate-90'" aria-hidden="true" />{{ t("superAgent.machineNav.unassigned") }}
+          </button>
+        </li>
+        <li v-for="session in looseSessionsOpen ? sessions : []" :key="session.id">
+          <SidebarSessionRow :machine-id="machine.id" :session="session" :online="machine.online" :depth="1" :to="sessionRoute(session.id, null)" />
+        </li>
+      </template>
+      <template v-else>
       <li v-if="!filtering">
         <TreeLink
           :machine-id="machine.id"
@@ -322,6 +430,7 @@ const machineIndicator = computed(() => {
           </li>
         </CollapsibleContent>
       </CollapsibleRoot>
+      </template>
     </CollapsibleContent>
   </CollapsibleRoot>
 </template>
@@ -346,6 +455,13 @@ const machineIndicator = computed(() => {
 .workspace-row:is(:hover, :has(:focus-visible)) :is(.workspace-collapse-icon, .workspace-actions) {
   opacity: 1;
   pointer-events: auto;
+}
+
+@media (hover: none) {
+  [data-project-workspace] .workspace-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
