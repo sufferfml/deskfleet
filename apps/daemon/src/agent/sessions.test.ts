@@ -1979,3 +1979,26 @@ test("deferStartup creates a provisioning Session immediately, adopts staged dra
   assert.equal(readyWithoutRun.inputs[0]?.state, "pending")
   assert.equal(f.provider.cwds.length, runsBeforeStopCase)
 })
+
+test("the DeskFleet skill reaches a Worker through ACP and preserves its raw journal inputs", async t => {
+  const f = await setup(t)
+  f.provider.finishImmediately = true
+  const config = await f.service.handle("_deskfleet/session/configuration", { sessionId: f.sessionId }, f.actor) as AgentConfiguration
+  assert.equal(config.supportsAdhdSkill, true)
+  async function run(text: string) {
+    const i = f.provider.prompts.length
+    await f.submit(text).result
+    const state = await until(f.read, s => s.turns.length === i + 1 && s.turns.at(-1)?.state === "completed")
+    assert.deepEqual(state.inputs.at(-1)?.content, [{ type: "text", text }])
+    return f.provider.prompts[i]!
+  }
+  assert.match(await run("/i-have-adhd"), /Briefly confirm/u)
+  const branch = async () => (await execute("git", ["-C", f.provider.cwds[0]!, "branch", "--show-current"])).stdout.trim()
+  assert.equal(await branch(), "")
+  assert.match(await run("$i-have-adhd 帮我写一个计划"), /^帮我写一个计划[\s\S]*Lead with the next action/u)
+  assert.match(await branch(), /^deskfleet\/session-/u)
+  assert.match(await run("继续"), /^继续[\s\S]*Pre-send check/u)
+  assert.equal(await run("/status"), "/status")
+  assert.match(await run("stop adhd mode"), /default reply style/u)
+  assert.equal(await run("普通回答"), "普通回答")
+})

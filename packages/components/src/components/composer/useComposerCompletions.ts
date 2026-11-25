@@ -1,5 +1,7 @@
 import { useDebounceFn } from "@vueuse/core"
 import { computed, nextTick, onScopeDispose, ref, watch, type Ref } from "vue"
+import { useI18n } from "vue-i18n"
+import { adhdSkillName } from "@deskfleet/protocol/adhd-command"
 import type { AgentConfiguration } from "@deskfleet/client/agent-configuration"
 import { composerTrigger, reconcileComposerMentions, validComposerMentions, type ComposerMention } from "../../services/composer-mentions.ts"
 import { useAgentSessionsStore } from "../../stores/agent-sessions.ts"
@@ -13,6 +15,7 @@ export interface ComposerCandidate {
   description: string
   token: string
   reference?: ComposerMention["reference"]
+  builtIn?: boolean
 }
 
 export function useComposerCompletions(options: {
@@ -25,6 +28,7 @@ export function useComposerCompletions(options: {
   discover(): Promise<void>
 }) {
   const agents = useAgentSessionsStore()
+  const { t } = useI18n()
   const providers = useProvidersStore()
   const focused = ref(false)
   const composing = ref(false)
@@ -38,6 +42,7 @@ export function useComposerCompletions(options: {
   let generation = 0
   let discoveryKey = ""
   let discovery: Promise<void> | undefined
+  const supportsAdhd = computed(() => options.configuration.value?.supportsAdhdSkill)
   const targetKey = computed(() => {
     const target = options.location()
     const provider = target?.session ? agents.sessions[target.session.id]?.provider : providers.selectedId
@@ -53,14 +58,18 @@ export function useComposerCompletions(options: {
     if (current.kind === "reference") return references.value
     const configuration = options.configuration.value
     const query = current.query.toLocaleLowerCase()
-    if (current.kind === "command") return (configuration?.commands ?? []).filter(command => command.name.toLocaleLowerCase().includes(query)).map(command => ({
-      key: `command:${command.name}`, kind: "command", name: `/${command.name}`, description: [command.description, command.inputHint].filter(Boolean).join(" · "), token: `/${command.name}`,
-    }))
-    return (configuration?.skills ?? []).filter(skill => skill.name.toLocaleLowerCase().includes(query)
+    const offerAdhd = supportsAdhd.value && !options.draft.value.slice(0, current.start).trim() && adhdSkillName.includes(query)
+    const token = (current.kind === "command" ? "/" : "$") + adhdSkillName
+    const builtIn: ComposerCandidate[] = offerAdhd ? [{ key: "deskfleet:i-have-adhd", kind: current.kind, name: token, token, builtIn: true, description: t("composer.completions.adhdSkill") }] : []
+    const matches = (name: string) => name.toLowerCase().includes(query) && !(offerAdhd && name.toLowerCase() === adhdSkillName)
+    if (current.kind === "command") return [...builtIn, ...(configuration?.commands ?? []).filter(command => matches(command.name)).map(command => ({
+      key: `command:${command.name}`, kind: "command" as const, name: `/${command.name}`, description: [command.description, command.inputHint].filter(Boolean).join(" · "), token: `/${command.name}`,
+    }))]
+    return [...builtIn, ...(configuration?.skills ?? []).filter(skill => matches(skill.name)
       && (!skill.invocation.startsWith("/") || !options.draft.value.slice(0, current.start).trim())).map(skill => ({
-      key: `skill:${skill.id}`, kind: "skill", name: `$${skill.name}`, description: skill.description, token: `$${skill.name}`,
-      reference: { kind: "skill", id: skill.id, name: skill.name, invocation: skill.invocation, providerId: configuration!.provider.id },
-    }))
+      key: `skill:${skill.id}`, kind: "skill" as const, name: `$${skill.name}`, description: skill.description, token: `$${skill.name}`,
+      reference: { kind: "skill" as const, id: skill.id, name: skill.name, invocation: skill.invocation, providerId: configuration!.provider.id },
+    }))]
   })
 
   const search = useDebounceFn(async (request: number) => {
@@ -91,6 +100,10 @@ export function useComposerCompletions(options: {
     const current = trigger.value
     if (!current) { loading.value = false; discoveryKey = ""; discovery = undefined; return }
     if (current.kind === "reference") { discoveryKey = ""; discovery = undefined; loading.value = true; void search(request); return }
+    if (candidates.value.some(candidate => candidate.builtIn) && ["adhd", adhdSkillName].includes(current.query.toLowerCase())) {
+      loading.value = false
+      return
+    }
     const key = `${targetKey.value}:${current.kind}`
     if (discoveryKey !== key) {
       discoveryKey = key

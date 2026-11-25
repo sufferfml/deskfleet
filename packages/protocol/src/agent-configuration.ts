@@ -62,6 +62,8 @@ export interface AgentConfiguration {
   promptCapabilities?: AgentPromptCapabilities
   commands?: AgentComposerCommand[]
   skills?: AgentComposerSkill[]
+  /** Daemon supports DeskFleet's built-in /i-have-adhd reply style command. */
+  supportsAdhdSkill?: boolean
   /** Confirmed draft configurations and transitions, scoped to the provider and Workspace. */
   matrix?: AgentConfigurationMatrix
 }

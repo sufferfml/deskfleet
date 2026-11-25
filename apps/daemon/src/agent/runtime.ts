@@ -17,7 +17,9 @@ import type { TerminalSessions } from "../terminals/terminals.ts"
 import { consumeTurn, settleUndispatchedTurn, unavailableAgentQuotas, type AgentQuotaAuthority } from "./quotas.ts"
 import { truncateGeneratedTitle } from "@deskfleet/protocol/titles"
 import { subagentNotification } from "@deskfleet/protocol/agent-session-scope"
-import { prepareWorktreeBranchPrompt } from "../worktrees/branch-naming.ts"
+import { adhdCommand } from "@deskfleet/protocol/adhd-command"
+import { workerReplyPrompt } from "./adhd-skill.ts"
+import { prepareWorktreeBranchPrompt, providerPromptContent } from "../worktrees/branch-naming.ts"
 
 export type ResolveAgentProvider = (providerId: string) => { provider: AgentProvider; config: AgentConfig }
 const systemCommand = async (journal: AgentJournal, sessionId: string, inputId: string): Promise<AgentCommand> => ({
@@ -608,7 +610,7 @@ export class AgentRuntime {
       const snapshot = await this.journal.read(this.sessionId)
       const previous = this.#claim(snapshot, inputId, command, true)
       const firstText = previous.content.find(block => block.type === "text")?.text ?? ""
-      if (!/^\s*\/\S+/u.test(firstText)) return false
+      if (!/^\s*\/\S+/u.test(firstText) && !adhdCommand(firstText)) return false
       const input: AgentInput = { ...previous, state: "pending", requestedDelivery: "backlog",
         requestedTurnId: undefined, dispatchCommandId: undefined, dispatcher: undefined, error: undefined }
       const rejected: AgentCommand = { ...command, status: "rejected", completedAt: timestamp(),
@@ -631,14 +633,14 @@ export class AgentRuntime {
       }
       const connection = this.#connection!
       if (!supportsSteering(connection.initialization)) throw new Error("This agent does not support steering")
-      const input = await this.journal.serial(this.sessionId, async () => {
+      const styledContent = await this.journal.serial(this.sessionId, async () => {
         const snapshot = await this.journal.read(this.sessionId)
         if (snapshot.turns.find(turn => turn.id === active.turn.id)?.state === "cancelling") return
         const input = this.#claim(snapshot, inputId, command, true)
         await this.journal.commit(snapshot, { inputs: [input], command, events: [this.journal.event(this.sessionId, "input", input)] })
-        return input
+        return workerReplyPrompt(input.content, snapshot)
       })
-      if (!input) {
+      if (!styledContent) {
         // A stop was committed before this steer could join. Use the normal inactive-turn fallback.
         await active.completion
         await this.#launch(inputId, command, true)
@@ -649,7 +651,7 @@ export class AgentRuntime {
       if (!this.running) throw new Error("Agent stopped before delivery")
       const prompt = await this.#catalog.attachments.preparePrompt(
         this.sessionId,
-        input.content,
+        providerPromptContent(styledContent, session.provider),
         connection.initialization.agentCapabilities?.promptCapabilities ?? undefined,
       )
       sent = true
@@ -689,7 +691,7 @@ export class AgentRuntime {
         name: models.options.find(option => option.id === models.currentValue)?.name ?? models.currentValue,
       } } : {}),
     }
-    const input = await this.journal.serial(this.sessionId, async () => {
+    const styledContent = await this.journal.serial(this.sessionId, async () => {
       const snapshot = await this.journal.read(this.sessionId)
       if (!this.running || snapshot.session.lifecycle !== "ready") throw new Error("Agent is stopping")
       if (snapshot.turns.some(liveTurn)) throw new Error("The current turn has not finished")
@@ -697,7 +699,7 @@ export class AgentRuntime {
       await this.journal.commit(snapshot, { inputs: [input], turns: [turn], command, events: [
         this.journal.event(this.sessionId, "input", input), this.journal.event(this.sessionId, "turn", turn),
       ] })
-      return input
+      return workerReplyPrompt(input.content, snapshot)
     })
     const session = await this.journal.session(this.sessionId)
     if (session.archiveState !== "active" || !this.running || this.#connection !== connection) {
@@ -711,7 +713,7 @@ export class AgentRuntime {
     void (async () => {
       let prompt = await this.#catalog.attachments.preparePrompt(
         this.sessionId,
-        input.content,
+        styledContent,
         connection.initialization.agentCapabilities?.promptCapabilities ?? undefined,
       )
       if (session.context === "worktree") {
@@ -722,6 +724,7 @@ export class AgentRuntime {
           preferences.branchNaming, this.journal.identity.originId, prompt)
       }
       if (!this.running || this.#connection !== connection) throw new Error("Agent stopped before delivery")
+      prompt = providerPromptContent(prompt, session.provider)
       await consumeTurn(this.journal, this.#quotas, turn)
       sent = true
       return await connection.prompt({ sessionId: session.providerSessionId!, prompt })

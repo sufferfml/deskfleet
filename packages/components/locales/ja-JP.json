@@ -812,6 +812,11 @@
     "uploadFailed": "アップロードに失敗しました", "retryUpload": "{name} のアップロードを再試行",
     "dropFiles": "ファイルをドロップして添付",
     "completions": {
+      "adhdSkill": "次の行動を先に示し、作業を手順に分けます。すべてのプロジェクトとエージェントで使えます。",
+      "adhdMode": {
+        "enabled": "この会話の ADHD モードを有効にしました。「stop adhd mode」で解除できます。",
+        "disabled": "この会話の ADHD モードを解除しました。"
+      },
       "label": "プロンプトの候補", "references": "選択した参照",
       "file": "ファイル", "session": "セッション",
       "skill": "スキル", "command": "コマンド",

@@ -975,6 +975,11 @@
     "retryUpload": "重试上传 {name}",
     "dropFiles": "拖放文件以添加附件",
     "completions": {
+      "adhdSkill": "本对话先给可执行的下一步，再分步说明。所有项目和 Agent 均可使用。",
+      "adhdMode": {
+        "enabled": "已为当前对话开启 ADHD 模式。发送 stop adhd mode 可关闭。",
+        "disabled": "已关闭当前对话的 ADHD 模式。"
+      },
       "label": "提示词补全",
       "references": "已选引用",
       "file": "文件",

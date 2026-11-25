@@ -1,3 +1,4 @@
+import { adhdCommand } from "@deskfleet/protocol/adhd-command"
 import type { ComposerReference } from "@deskfleet/protocol/composer-reference"
 
 export interface ComposerSkillReference { kind: "skill"; id: string; name: string; invocation: string; providerId: string }
@@ -47,4 +48,4 @@ export function composerTrigger(text: string, caret: number, mentions: readonly 
 }
 
 /** Slash commands are delivered as a new turn, including commands typed without autocomplete. */
-export function commandDraft(text: string): boolean { return /^\s*\/\S+/u.test(text) }
+export function commandDraft(text: string): boolean { return /^\s*\/\S+/u.test(text) || !!adhdCommand(text) }

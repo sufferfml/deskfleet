@@ -975,6 +975,11 @@
     "retryUpload": "Retry uploading {name}",
     "dropFiles": "Drop files to attach",
     "completions": {
+      "adhdSkill": "Lead with the next action and break work into steps. Available for every project and agent.",
+      "adhdMode": {
+        "enabled": "ADHD mode is on for this conversation. Send “stop adhd mode” to turn it off.",
+        "disabled": "ADHD mode is off for this conversation."
+      },
       "label": "Prompt suggestions",
       "references": "Selected references",
       "file": "Files",
