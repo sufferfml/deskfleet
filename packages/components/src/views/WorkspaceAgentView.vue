@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Archive, ArrowDown, ArrowRight, CalendarClock, ChevronDown, ChevronRight, ClipboardList, CornerUpLeft, Folder, MapPin, MessagesSquare, X } from "@lucide/vue"
+import { Archive, ArrowDown, ArrowRight, ChevronDown, ChevronRight, ClipboardList, CornerUpLeft, Folder, MapPin, MessagesSquare, X } from "@lucide/vue"
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from "reka-ui"
 import { useOnline, useResizeObserver, useTimeoutFn } from "@vueuse/core"
 import { computed, nextTick, onBeforeUnmount, ref, useTemplateRef, watch } from "vue"
@@ -7,8 +7,8 @@ import { useI18n } from "vue-i18n"
 import { RouterLink, useRouter } from "vue-router"
 import type { GithubRepositoryItem } from "@deskfleet/client/central"
 import type { DeskfleetDesktopApi } from "@deskfleet/client/desktop-api"
-import type { FollowUpRunRecord, FollowUpSourcesResponse, SuperFeedbackItem, SuperMessage, SuperTicket, SuperWorkerRequest, SuperWorkspaceId } from "@deskfleet/protocol/super-agent"
-import { disableTakeoverOnMachine, enableTakeoverOnMachine } from "../services/workspace-agent-follow-up.ts"
+import type { FollowUpRunRecord, SuperFeedbackItem, SuperMessage, SuperTicket, SuperWorkerRequest, SuperWorkspaceId } from "@deskfleet/protocol/super-agent"
+import { enableTakeoverOnMachine } from "../services/workspace-agent-follow-up.ts"
 import ConfirmDialog from "../components/common/ConfirmDialog.vue"
 import GithubIcon from "../components/common/GithubIcon.vue"
 import GithubPanel from "../components/details/GithubPanel.vue"
@@ -49,7 +49,7 @@ const agents = useAgentSessionsStore()
 const providers = useProvidersStore()
 const client = usePlatformClient()
 const touchWorkspace = !!(client.mobile && client.remoteWorkspaceAgent)
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const workspaceName = (id: string) => fleet.findWorkspace(id)?.workspace.name ?? t("superAgent.workspace")
 const conversationName = (id: SuperWorkspaceId) => id === null ? t("superAgent.defaultWorkspace") : workspaceName(id)
 const name = computed(() => conversationName(props.workspaceId))
@@ -78,12 +78,13 @@ const tickets = computed(() => new Map(snapshot.value?.tickets.map(ticket => [ti
 const activeTickets = computed(() => (snapshot.value?.tickets ?? []).filter(ticket => !ticket.archiveState))
 const archivedTickets = computed(() => (snapshot.value?.tickets ?? []).filter(ticket => ticket.archiveState))
 const ticketMenuOpen = ref(false)
-const followUpMenuOpen = ref(false)
 const followUpBusy = ref(false)
 const followUpError = ref("")
-const followUpSources = ref<FollowUpSourcesResponse>()
-const followUpRuns = ref<FollowUpRunRecord[]>([])
+const fetchedFollowUpRuns = ref<FollowUpRunRecord[]>([])
+const extraFollowUpRuns = ref<FollowUpRunRecord[]>([])
 const followUpRunsCursor = ref<{ createdAt: string; id: string }>()
+const followUpRunsLoading = ref(false)
+const followUpRunsLoadedOnce = ref(false)
 const machineName = computed(() => account?.machine.value?.name ?? location.value?.machine.name ?? fleet.localDesktopTarget.name)
 const pendingAuthScheduleCount = computed(() => snapshot.value?.followUp?.pendingAuthScheduleCount ?? 0)
 const takeoverActive = computed(() =>
@@ -96,27 +97,53 @@ const needsFollowUpConsent = computed(() =>
   && (!!snapshot.value.followUp?.needsConsent || pendingAuthScheduleCount.value > 0),
 )
 
-async function loadFollowUpPanel(append = false) {
-  if (!snapshot.value?.supportsProactiveFollowUp || !props.api.followUpSources || !props.api.followUpRuns) return
-  followUpBusy.value = true
+const followUpRuns = computed<FollowUpRunRecord[]>(() => {
+  const primary = snapshot.value?.followUpRuns ?? fetchedFollowUpRuns.value
+  const merged = new Map<string, FollowUpRunRecord>()
+  for (const run of primary) merged.set(run.id, run)
+  for (const run of extraFollowUpRuns.value) {
+    if (!merged.has(run.id)) merged.set(run.id, run)
+  }
+  return [...merged.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+})
+
+async function loadFollowUpRuns(append = false) {
+  if (!snapshot.value?.supportsProactiveFollowUp || !props.api.followUpRuns || followUpRunsLoading.value) return
+  followUpRunsLoading.value = true
   followUpError.value = ""
   try {
     if (!append) {
-      followUpSources.value = await props.api.followUpSources({ workspaceId: props.workspaceId })
-      const page = await props.api.followUpRuns({ workspaceId: props.workspaceId ?? undefined, limit: 10 })
-      followUpRuns.value = page.runs
+      const page = await props.api.followUpRuns({ workspaceId: props.workspaceId ?? undefined, limit: 20 })
+      fetchedFollowUpRuns.value = page.runs
+      extraFollowUpRuns.value = []
       followUpRunsCursor.value = page.nextCursor
+      followUpRunsLoadedOnce.value = true
     } else if (followUpRunsCursor.value) {
-      const page = await props.api.followUpRuns({ workspaceId: props.workspaceId ?? undefined, cursor: followUpRunsCursor.value, limit: 10 })
-      followUpRuns.value = [...followUpRuns.value, ...page.runs]
+      const page = await props.api.followUpRuns({ workspaceId: props.workspaceId ?? undefined, cursor: followUpRunsCursor.value, limit: 20 })
+      extraFollowUpRuns.value = [...extraFollowUpRuns.value, ...page.runs]
       followUpRunsCursor.value = page.nextCursor
     }
   } catch (reason) {
     followUpError.value = reason instanceof Error ? reason.message : String(reason)
-  } finally { followUpBusy.value = false }
+  } finally { followUpRunsLoading.value = false }
 }
 
-watch(followUpMenuOpen, open => { if (open) void loadFollowUpPanel(false) })
+watch(() => snapshot.value, snap => {
+  if (!snap) return
+  if (snap.followUpRuns !== undefined) {
+    if (!extraFollowUpRuns.value.length) followUpRunsCursor.value = snap.followUpRunsCursor
+    return
+  }
+  if (snap.supportsProactiveFollowUp && props.api.followUpRuns && !followUpRunsLoadedOnce.value) {
+    void loadFollowUpRuns(false)
+  }
+}, { immediate: true })
+
+watch(ticketMenuOpen, open => {
+  if (open && snapshot.value?.supportsProactiveFollowUp && snapshot.value?.followUpRuns === undefined && props.api.followUpRuns) {
+    void loadFollowUpRuns(false)
+  }
+})
 
 async function consentBackgroundFollowUp() {
   if (followUpBusy.value || !props.api.followUpAuth) return
@@ -138,51 +165,36 @@ async function consentBackgroundFollowUp() {
   } finally { followUpBusy.value = false }
 }
 
-async function toggleUnifiedTakeover(nextEnabled: boolean) {
-  if (followUpBusy.value || !props.api.followUpAuth) return
-  followUpBusy.value = true
-  followUpError.value = ""
-  try {
-    const targetScope = {
-      serverUrl: account?.account.value.serverUrl,
-      userId: account?.account.value.user?.id,
-      teamId: account?.teamId.value,
-      machineId: fleet.targetId,
-    }
-    if (nextEnabled) {
-      const receipt = await enableTakeoverOnMachine(props.api, targetScope, {
-        platform: client.platform,
-        deviceLabel: client.platform,
-        machineName: machineName.value,
-      })
-      if (receipt.status === "stale_ignored" || !receipt.authorized || receipt.summary?.takeoverAllSessions !== true) {
-        followUpError.value = t("superAgent.followUp.takeoverAllAuthFailed")
-      }
-    } else {
-      await disableTakeoverOnMachine(props.api, targetScope)
-    }
-    await loadFollowUpPanel(false)
-    await refresh()
-  } catch (reason) {
-    followUpError.value = reason instanceof Error ? reason.message : String(reason)
-  } finally { followUpBusy.value = false }
-}
-
-async function updateFollowedSource(workspaceId: string, sourceKind: "schedule" | "session", sourceId: string, changes: { enabled?: boolean; reconfirmOwnership?: boolean; adopt?: boolean }) {
-  if (followUpBusy.value || !props.api.followUpUpdateSource) return
-  followUpBusy.value = true
-  followUpError.value = ""
-  try {
-    await props.api.followUpUpdateSource({ workspaceId, sourceKind, sourceId, ...changes })
-    await loadFollowUpPanel(false)
-    await refresh()
-  } catch (reason) {
-    followUpError.value = reason instanceof Error ? reason.message : String(reason)
-  } finally { followUpBusy.value = false }
-}
-
 function scheduleRoute(scheduleId: string) {
   return { name: "schedules", params: { scheduleId } }
+}
+
+function runStatusLabel(status?: FollowUpRunRecord["status"]): string {
+  if (!status) return ""
+  return t(`superAgent.followUp.runStatus.${status}`)
+}
+
+function evidenceAvailabilityLabel(availability: FollowUpRunRecord["evidenceAvailability"]): string {
+  return t(
+    availability === "archived"
+      ? "superAgent.followUp.evidenceArchived"
+      : availability === "deleted"
+        ? "superAgent.followUp.evidenceDeleted"
+        : availability === "partial"
+          ? "superAgent.followUp.evidencePartial"
+          : "superAgent.followUp.evidenceRestricted",
+  )
+}
+
+function formatRunTime(iso?: string): string {
+  if (!iso) return ""
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  try {
+    return new Intl.DateTimeFormat(locale.value, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date)
+  } catch {
+    return iso.slice(0, 16).replace("T", " ")
+  }
 }
 
 const confirmingArchive = ref<{ ticket: SuperTicket; archive: boolean; operationId: string }>()
@@ -302,7 +314,99 @@ const transcriptGroups = computed(() => groupWorkspaceApprovals(rows.value))
 const expandedApprovals = ref(new Set<string>())
 const locatedMessage = ref<string>()
 const { start: clearHighlightLater } = useTimeoutFn(() => { locatedMessage.value = undefined }, 2000, { immediate: false })
-watch(attachmentScope, () => expandedApprovals.value.clear())
+watch(attachmentScope, () => {
+  expandedApprovals.value.clear()
+  fetchedFollowUpRuns.value = []
+  extraFollowUpRuns.value = []
+  followUpRunsCursor.value = undefined
+  followUpRunsLoadedOnce.value = false
+  followUpError.value = ""
+})
+
+function linkedTicketIdForRun(run: FollowUpRunRecord): string | undefined {
+  if (run.ticketId && tickets.value.has(run.ticketId)) return run.ticketId
+  if (run.deliveredMessageId) {
+    const msgTicketId = byId.value.get(run.deliveredMessageId)?.ticketId
+    if (msgTicketId && tickets.value.has(msgTicketId)) return msgTicketId
+  }
+  return undefined
+}
+const runsByTicketId = computed(() => {
+  const map = new Map<string, FollowUpRunRecord[]>()
+  for (const run of followUpRuns.value) {
+    const tid = linkedTicketIdForRun(run)
+    if (!tid) continue
+    const list = map.get(tid) ?? []
+    list.push(run)
+    map.set(tid, list)
+  }
+  return map
+})
+const standaloneFollowUpRuns = computed(() =>
+  followUpRuns.value.filter(run => !linkedTicketIdForRun(run)),
+)
+const ticketBadgeCount = computed(() => activeTickets.value.length + standaloneFollowUpRuns.value.length)
+
+interface FollowUpMessageRunInfo {
+  title: string
+  sourceKind: "schedule" | "session"
+  sourceTitle?: string
+  scheduleId?: string
+  runId?: string
+  status?: FollowUpRunRecord["status"]
+  provider?: string
+  detail?: string
+  error?: string
+  timestamp?: string
+  sessionId?: string
+  evidenceAvailability: FollowUpRunRecord["evidenceAvailability"]
+}
+
+function matchFollowUpRun(message: SuperMessage): FollowUpRunRecord | undefined {
+  const prov = message.provenance
+  if (!prov || prov.origin !== "sa_follow_up") return undefined
+  return followUpRuns.value.find(run => run.deliveredMessageId === message.id)
+    ?? (prov.runId ? followUpRuns.value.find(run => run.runId === prov.runId && run.sourceId === prov.sourceId) : undefined)
+    ?? (prov.runKey ? followUpRuns.value.find(run => run.runKey === prov.runKey && run.sourceId === prov.sourceId) : undefined)
+    ?? (message.sessionId && message.turnId ? followUpRuns.value.find(run => run.sessionId === message.sessionId && run.turnId === message.turnId) : undefined)
+}
+
+const runInfoByMessageId = computed(() => {
+  const map = new Map<string, FollowUpMessageRunInfo>()
+  for (const message of messages.value) {
+    const prov = message.provenance
+    if (!prov || prov.origin !== "sa_follow_up" || message.role !== "assistant") continue
+    const matched = matchFollowUpRun(message)
+    const sourceTitle = prov.scheduleTitle ?? matched?.scheduleTitle
+    const title = sourceTitle ?? prov.sourceId
+    map.set(message.id, {
+      title,
+      sourceKind: prov.sourceKind,
+      sourceTitle,
+      scheduleId: prov.scheduleId ?? matched?.scheduleId,
+      runId: prov.runId ?? matched?.runId,
+      status: prov.runStatus ?? matched?.status,
+      provider: prov.provider ?? matched?.provider,
+      detail: prov.detail ?? matched?.detail,
+      error: matched?.error,
+      timestamp: prov.finishedAt ?? matched?.finishedAt ?? prov.startedAt ?? matched?.startedAt ?? message.createdAt,
+      sessionId: message.sessionId ?? prov.sessionId ?? matched?.sessionId,
+      evidenceAvailability: matched?.evidenceAvailability ?? prov.evidenceAvailability ?? "available",
+    })
+  }
+  return map
+})
+
+function visibleSessionsFor(sessions: { id: string; title?: string }[], runInfo?: FollowUpMessageRunInfo) {
+  if (!runInfo) return sessions
+  const filtered = runInfo.evidenceAvailability === "deleted" && runInfo.sessionId
+    ? sessions.filter(item => item.id !== runInfo.sessionId)
+    : [...sessions]
+  if (runInfo.sessionId && runInfo.evidenceAvailability !== "deleted" && !filtered.some(item => item.id === runInfo.sessionId)) {
+    filtered.push({ id: runInfo.sessionId, title: undefined })
+  }
+  return filtered
+}
 function toggleApprovals(id: string) {
   if (expandedApprovals.value.has(id)) expandedApprovals.value.delete(id)
   else expandedApprovals.value.add(id)
@@ -358,9 +462,7 @@ function locateEntry(id: string) {
   entry.scrollIntoView({ block: "start", behavior: "instant" })
   activeEntry.value = entry.dataset.outlineSource
 }
-async function locateTicket(ticketId: string) {
-  const id = lastMessageByTicket.value.get(ticketId)
-  if (!id) return
+async function locateMessage(id: string) {
   const group = transcriptGroups.value.find(group => group.approvals && group.rows.some(row => row.message.id === id))
   if (group) expandedApprovals.value.add(group.id)
   ticketMenuOpen.value = false
@@ -368,6 +470,11 @@ async function locateTicket(ticketId: string) {
   await nextTick()
   locateEntry(id)
   clearHighlightLater()
+}
+async function locateTicket(ticketId: string) {
+  const id = lastMessageByTicket.value.get(ticketId)
+  if (!id) return
+  await locateMessage(id)
 }
 function scrollToBottom() {
   const el = viewport.value
@@ -442,69 +549,9 @@ function canCorrect(message: SuperMessage) {
           </PopoverContent>
         </PopoverPortal>
       </PopoverRoot>
-      <PopoverRoot v-if="snapshot?.supportsProactiveFollowUp" v-model:open="followUpMenuOpen">
-        <PopoverTrigger type="button" data-follow-up-menu :class="touchWorkspace && 'min-h-11'" class="app-no-drag ui-button-ghost h-7 px-2 data-[state=open]:bg-ui-hover">
-          <CalendarClock :size="15" aria-hidden="true" />{{ t("superAgent.followUp.history") }}
-        </PopoverTrigger>
-        <PopoverPortal>
-          <PopoverContent :as="SpringSurface" align="end" :side-offset="6" :collision-padding="8" :aria-label="t('superAgent.followUp.history')" class="ui-menu z-50 w-96 max-w-[calc(100vw-1rem)] max-h-[min(65dvh,var(--reka-popover-content-available-height))] overflow-y-auto overscroll-contain p-3">
-            <div class="flex items-center justify-between gap-2 pb-2">
-              <span class="text-xs font-medium text-ui-text-muted">{{ t("superAgent.followUp.history") }}</span>
-              <RouterLink :to="{ name: 'schedules' }" class="text-xs text-ui-accent no-underline hover:underline">{{ t("superAgent.followUp.openSchedules") }}</RouterLink>
-            </div>
-            <div v-if="props.api.followUpAuth" class="mb-3 flex items-center justify-between gap-2 rounded-lg border border-ui-border px-2.5 py-2 text-xs">
-              <div class="min-w-0">
-                <div class="font-medium">{{ t("superAgent.followUp.takeoverAllLabel") }}</div>
-                <div class="text-ui-text-muted">
-                  <template v-if="followUpSources?.auth.authorized && followUpSources?.auth.takeoverAllSessions">{{ t("superAgent.followUp.takeoverAllActive", { machine: machineName }) }}</template>
-                  <template v-else>{{ t("superAgent.followUp.takeoverAllDescription", { machine: machineName }) }}</template>
-                </div>
-              </div>
-              <UiButton v-if="!(followUpSources?.auth.authorized && followUpSources?.auth.takeoverAllSessions)" type="button" size="sm" variant="primary" data-follow-up-takeover-enable :disabled="followUpBusy" @click="toggleUnifiedTakeover(true)">{{ t("superAgent.followUp.resumeFollowUp") }}</UiButton>
-              <UiButton v-else type="button" size="sm" data-follow-up-takeover-disable :disabled="followUpBusy" @click="toggleUnifiedTakeover(false)">{{ t("superAgent.followUp.stopFollowUp") }}</UiButton>
-            </div>
-            <p v-if="followUpError" role="alert" class="my-1 text-xs text-ui-danger">{{ followUpError }}</p>
-            <div v-if="followUpSources?.sources.length" class="mb-3 flex flex-col gap-2 border-b border-ui-border pb-3">
-              <div v-for="source in followUpSources.sources" :key="source.id" class="flex items-start justify-between gap-2 text-xs">
-                <div class="min-w-0">
-                  <div class="truncate font-medium">{{ source.state.scheduleTitle ?? source.sourceId }}</div>
-                  <div class="text-ui-text-muted">
-                    <template v-if="source.state.pausedReason === 'modified_by_other_member'">{{ t("superAgent.followUp.ownershipPaused") }}</template>
-                    <template v-else-if="source.state.pausedReason === 'awaiting_authorization'">{{ t("superAgent.followUp.awaitingAuthorization") }}</template>
-                    <template v-else-if="source.state.enabled">{{ t("superAgent.followUp.followed") }}</template>
-                    <template v-else>{{ t("superAgent.followUp.followUpStopped") }}</template>
-                  </div>
-                </div>
-                <div class="flex shrink-0 items-center gap-1.5">
-                  <RouterLink v-if="source.sourceKind === 'schedule'" :to="scheduleRoute(source.sourceId)" class="text-ui-accent no-underline hover:underline">{{ t("superAgent.followUp.openSchedule") }}</RouterLink>
-                  <RouterLink v-else :to="sessionRoute(source.sourceId)" class="text-ui-accent no-underline hover:underline">{{ t("superAgent.openSession") }}</RouterLink>
-                  <button v-if="source.state.pausedReason === 'modified_by_other_member'" type="button" class="text-ui-accent" :disabled="followUpBusy" @click="updateFollowedSource(source.workspaceId, source.sourceKind, source.sourceId, { enabled: true, reconfirmOwnership: true })">{{ t("superAgent.followUp.reconfirmOwnership") }}</button>
-                  <button v-else-if="source.state.enabled" type="button" class="text-ui-text-muted hover:text-ui-text" :disabled="followUpBusy" @click="updateFollowedSource(source.workspaceId, source.sourceKind, source.sourceId, { enabled: false })">{{ t(source.sourceKind === 'schedule' ? "superAgent.followUp.stopFollowUp" : "superAgent.followUp.viewInSessionOnly") }}</button>
-                  <button v-else type="button" class="text-ui-accent" :disabled="followUpBusy" @click="updateFollowedSource(source.workspaceId, source.sourceKind, source.sourceId, { enabled: true })">{{ t("superAgent.followUp.resumeFollowUp") }}</button>
-                </div>
-              </div>
-            </div>
-            <div v-if="followUpRuns.length" class="flex flex-col gap-2">
-              <div v-for="run in followUpRuns" :key="run.id" class="rounded-lg border border-ui-border px-2.5 py-2 text-xs">
-                <div class="flex items-center justify-between gap-2">
-                  <span class="truncate font-medium">{{ run.scheduleTitle ?? run.sourceId }} · {{ run.status }}</span>
-                  <div class="flex shrink-0 items-center gap-2">
-                    <RouterLink v-if="run.scheduleId" :to="scheduleRoute(run.scheduleId)" class="text-ui-accent no-underline hover:underline">{{ t("superAgent.followUp.openSchedule") }}</RouterLink>
-                    <RouterLink v-if="run.sessionId && run.evidenceAvailability !== 'deleted'" :to="sessionRoute(run.sessionId)" class="text-ui-accent no-underline hover:underline">{{ t("superAgent.openSession") }}</RouterLink>
-                  </div>
-                </div>
-                <p class="my-1 whitespace-pre-wrap text-ui-text-muted">{{ run.summary }}</p>
-                <p v-if="run.evidenceAvailability !== 'available'" class="m-0 text-[11px] text-ui-text-faint">{{ t(run.evidenceAvailability === 'archived' ? 'superAgent.followUp.evidenceArchived' : run.evidenceAvailability === 'deleted' ? 'superAgent.followUp.evidenceDeleted' : run.evidenceAvailability === 'partial' ? 'superAgent.followUp.evidencePartial' : 'superAgent.followUp.evidenceRestricted') }}</p>
-              </div>
-              <UiButton v-if="followUpRunsCursor" type="button" size="sm" :loading="followUpBusy" @click="loadFollowUpPanel(true)">{{ t("superAgent.followUp.loadMore") }}</UiButton>
-            </div>
-            <p v-else class="m-0 text-xs text-ui-text-muted">{{ t("superAgent.followUp.noRuns") }}</p>
-          </PopoverContent>
-        </PopoverPortal>
-      </PopoverRoot>
-      <PopoverRoot v-if="tickets.size" v-model:open="ticketMenuOpen">
-        <PopoverTrigger type="button" :class="touchWorkspace && 'min-h-11'" class="app-no-drag ui-button-ghost h-7 px-2 data-[state=open]:bg-ui-hover">
-          <ClipboardList :size="15" aria-hidden="true" />{{ t("superAgent.tickets", { count: activeTickets.length }) }}
+      <PopoverRoot v-if="tickets.size || followUpRuns.length" v-model:open="ticketMenuOpen">
+        <PopoverTrigger type="button" data-tickets-menu :class="touchWorkspace && 'min-h-11'" class="app-no-drag ui-button-ghost h-7 px-2 data-[state=open]:bg-ui-hover">
+          <ClipboardList :size="15" aria-hidden="true" />{{ t("superAgent.tickets", { count: ticketBadgeCount }) }}
         </PopoverTrigger>
         <PopoverPortal>
           <PopoverContent :as="SpringSurface" align="end" :side-offset="6" :collision-padding="8" :aria-label="t('superAgent.ticketList')" class="ui-menu z-50 w-96 max-w-[calc(100vw-1rem)] max-h-[min(60dvh,var(--reka-popover-content-available-height))] overflow-y-auto overscroll-contain p-3">
@@ -523,6 +570,24 @@ function canCorrect(message: SuperMessage) {
                       <button v-if="canChangeTicketArchive(ticket)" type="button" :disabled="busy" @click="chooseArchive(ticket)">{{ t(ticket.archiveState === 'archived' ? 'superAgent.restoreTicket' : 'superAgent.archiveTicket') }}</button>
                       <span v-else-if="ticket.archiveState && ticket.sessionId && !ticket.workerContext" class="text-ui-text-muted">{{ t('superAgent.workerUnavailable') }}</span>
                     </div>
+                    <div v-if="runsByTicketId.get(ticket.id)?.length" data-ticket-linked-runs class="mt-2 flex flex-col gap-1.5 border-t border-ui-border pt-2">
+                      <span class="text-[11px] font-medium text-ui-text-muted">{{ t("superAgent.followUp.linkedRuns") }}</span>
+                      <div v-for="run in runsByTicketId.get(ticket.id)" :key="run.id" :data-ticket-run="run.id" class="rounded-md border border-ui-border px-2 py-1.5 text-xs">
+                        <div class="flex flex-wrap items-center justify-between gap-1 text-[11px] text-ui-text-muted">
+                          <span>{{ runStatusLabel(run.status) }}<template v-if="run.provider"> · {{ providerName(run.provider) }}</template></span>
+                          <time :datetime="run.finishedAt ?? run.startedAt">{{ formatRunTime(run.finishedAt ?? run.startedAt) }}</time>
+                        </div>
+                        <p class="my-1 select-text whitespace-pre-wrap text-xs text-ui-text">{{ run.summary }}</p>
+                        <p v-if="run.detail && run.detail.trim() !== run.summary.trim()" data-ticket-run-detail class="my-1 select-text whitespace-pre-wrap text-[11px] text-ui-text-muted">{{ run.detail }}</p>
+                        <p v-else-if="run.error && !run.summary.includes(run.error)" class="my-1 select-text whitespace-pre-wrap text-[11px] text-ui-danger">{{ run.error }}</p>
+                        <p v-if="run.evidenceAvailability !== 'available'" class="my-0.5 text-[11px] text-ui-text-faint">{{ evidenceAvailabilityLabel(run.evidenceAvailability) }}</p>
+                        <div class="mt-1 flex flex-wrap items-center gap-x-3 text-xs text-ui-accent">
+                          <RouterLink v-if="run.sessionId && run.evidenceAvailability !== 'deleted'" :to="sessionRoute(run.sessionId)" data-ticket-run-open-session class="inline-flex items-center no-underline hover:underline">{{ t("superAgent.openSession") }}</RouterLink>
+                          <RouterLink v-if="run.scheduleId" :to="scheduleRoute(run.scheduleId)" data-ticket-run-open-schedule class="inline-flex items-center no-underline hover:underline">{{ t("superAgent.followUp.openSchedule") }}</RouterLink>
+                          <button v-if="run.deliveredMessageId && byId.has(run.deliveredMessageId)" type="button" data-ticket-run-locate class="text-ui-accent" @click="locateMessage(run.deliveredMessageId)">{{ t("superAgent.followUp.locateRunMessage", { name: run.scheduleTitle ?? run.sourceId }) }}</button>
+                        </div>
+                      </div>
+                    </div>
                   </details>
                   <div class="mt-0.5 flex shrink-0 items-center">
                     <UiButton variant="ghost" size="icon" :class="touchWorkspace && 'min-h-11 min-w-11'"
@@ -538,6 +603,41 @@ function canCorrect(message: SuperMessage) {
                 </div>
               </component>
             </template>
+            <div v-if="standaloneFollowUpRuns.length" data-ticket-runs-section :class="tickets.size && 'mt-2 border-t border-ui-border pt-2'">
+              <div class="pb-1 text-xs font-medium text-ui-text-muted">{{ t("superAgent.followUp.runsHeading", { count: standaloneFollowUpRuns.length }) }}</div>
+              <div v-for="run in standaloneFollowUpRuns" :key="run.id" :data-ticket-run="run.id" class="flex items-start gap-1">
+                <details class="min-w-0 flex-1 break-words py-1.5">
+                  <summary :class="touchWorkspace && 'min-h-11 py-2'" class="cursor-pointer text-sm font-medium">
+                    {{ run.scheduleTitle ?? run.sourceId }}
+                    <small class="text-ui-text-muted">{{ runStatusLabel(run.status) }}</small>
+                    <small v-if="run.finishedAt || run.startedAt" class="ml-1 font-normal text-ui-text-faint">{{ formatRunTime(run.finishedAt ?? run.startedAt) }}</small>
+                  </summary>
+                  <p class="my-1 text-[11px] text-ui-text-muted">
+                    {{ t(run.sourceKind === 'schedule' ? 'superAgent.followUp.fromSchedule' : 'superAgent.followUp.fromSession', { title: run.scheduleTitle ?? run.sourceId }) }}
+                    <template v-if="run.provider"> · {{ providerName(run.provider) }}</template>
+                  </p>
+                  <p class="my-1.5 select-text whitespace-pre-wrap text-sm">{{ run.summary }}</p>
+                  <p v-if="run.detail && run.detail.trim() !== run.summary.trim()" data-ticket-run-detail class="my-1.5 select-text whitespace-pre-wrap rounded border border-ui-border px-2 py-1.5 text-xs text-ui-text-muted">{{ run.detail }}</p>
+                  <p v-else-if="run.error && !run.summary.includes(run.error)" class="my-1 select-text whitespace-pre-wrap text-xs text-ui-danger">{{ run.error }}</p>
+                  <p v-if="run.evidenceAvailability !== 'available'" class="my-1 text-[11px] text-ui-text-faint">{{ evidenceAvailabilityLabel(run.evidenceAvailability) }}</p>
+                  <div class="flex flex-wrap items-center gap-x-3 text-xs text-ui-accent" :class="touchWorkspace && 'workspace-touch-actions'">
+                    <RouterLink v-if="run.sessionId && run.evidenceAvailability !== 'deleted'" :to="sessionRoute(run.sessionId)" data-ticket-run-open-session class="inline-flex items-center">{{ t('superAgent.openSession') }}</RouterLink>
+                    <RouterLink v-if="run.scheduleId" :to="scheduleRoute(run.scheduleId)" data-ticket-run-open-schedule class="inline-flex items-center">{{ t('superAgent.followUp.openSchedule') }}</RouterLink>
+                  </div>
+                </details>
+                <div class="mt-0.5 flex shrink-0 items-center">
+                  <UiButton variant="ghost" size="icon" :class="touchWorkspace && 'min-h-11 min-w-11'"
+                    data-ticket-run-locate
+                    :label="t('superAgent.followUp.locateRunMessage', { name: run.scheduleTitle ?? run.sourceId })"
+                    :disabled="!(run.deliveredMessageId && byId.has(run.deliveredMessageId))"
+                    @click="run.deliveredMessageId && locateMessage(run.deliveredMessageId)">
+                    <MapPin :size="16" :stroke-width="1.75" aria-hidden="true" />
+                  </UiButton>
+                </div>
+              </div>
+              <UiButton v-if="followUpRunsCursor" type="button" size="sm" class="mt-2" :loading="followUpRunsLoading" @click="loadFollowUpRuns(true)">{{ t("superAgent.followUp.loadMore") }}</UiButton>
+            </div>
+            <p v-if="followUpError" role="alert" class="my-1 text-xs text-ui-danger">{{ followUpError }}</p>
           </PopoverContent>
         </PopoverPortal>
       </PopoverRoot>
@@ -572,13 +672,25 @@ function canCorrect(message: SuperMessage) {
               <WorkspaceMessage :resource-target="message.role === 'worker' ? resourceTarget : undefined" :read-attachment="readAttachment" :message="message" :touch="touchWorkspace" :animate-send="message.id === lastUserMessage" :can-fork="!!fork && supportsFork(fork.sessionId)" :fork-disabled="!!offlineMachine"
                 @quote="quote(message)" @fork="fork && openFork(fork.sessionId, fork.turnId)">
                 <template #heading>
-                  <button v-if="ticket || jobs.length || sessions.length || canCorrect(message)" type="button" :class="touchWorkspace && 'min-h-11'" class="inline-flex items-center gap-0.5 text-ui-accent" :aria-expanded="details === message.id" @click="toggleDetails(message.id)">
-                    {{ jobs.length > 1 ? t('superAgent.tickets', { count: jobs.length }) : ticket?.title ?? t('superAgent.ticketDetails') }}<ChevronDown :size="12" :class="details === message.id && 'rotate-180'" aria-hidden="true" />
+                  <button v-if="ticket || runInfoByMessageId.get(message.id) || jobs.length || visibleSessionsFor(sessions, runInfoByMessageId.get(message.id)).length || canCorrect(message)" type="button" data-execution-toggle :class="touchWorkspace && 'min-h-11'" class="inline-flex items-center gap-0.5 text-ui-accent" :aria-expanded="details === message.id" @click="toggleDetails(message.id)">
+                    {{ jobs.length > 1 ? t('superAgent.tickets', { count: jobs.length }) : ticket?.title ?? runInfoByMessageId.get(message.id)?.title ?? t('superAgent.ticketDetails') }}<ChevronDown :size="12" :class="details === message.id && 'rotate-180'" aria-hidden="true" />
                   </button>
                 </template>
                 <template #before>
-                  <div v-if="details === message.id" class="mb-2 rounded-lg border border-ui-border px-3 py-2 text-xs">
-                    <template v-if="ticket">
+                  <div v-if="details === message.id" data-execution-details class="mb-2 rounded-lg border border-ui-border px-3 py-2 text-xs">
+                    <template v-if="runInfoByMessageId.get(message.id)">
+                      <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-ui-text-muted">
+                        <span v-if="runInfoByMessageId.get(message.id)!.provider" class="font-medium text-ui-text">{{ providerName(runInfoByMessageId.get(message.id)!.provider!) }}</span>
+                        <span v-if="runInfoByMessageId.get(message.id)!.status"><template v-if="runInfoByMessageId.get(message.id)!.provider"> · </template>{{ runStatusLabel(runInfoByMessageId.get(message.id)!.status) }}</span>
+                        <span v-if="runInfoByMessageId.get(message.id)!.sourceTitle"> · {{ t(runInfoByMessageId.get(message.id)!.sourceKind === 'schedule' ? 'superAgent.followUp.fromSchedule' : 'superAgent.followUp.fromSession', { title: runInfoByMessageId.get(message.id)!.sourceTitle! }) }}</span>
+                        <time v-if="runInfoByMessageId.get(message.id)!.timestamp" :datetime="runInfoByMessageId.get(message.id)!.timestamp"> · {{ formatRunTime(runInfoByMessageId.get(message.id)!.timestamp) }}</time>
+                      </div>
+                      <p v-if="ticket?.scope" class="my-1 select-text whitespace-pre-wrap text-ui-text-muted">{{ ticket.scope }}</p>
+                      <p v-if="runInfoByMessageId.get(message.id)!.detail" data-execution-detail-body class="my-1.5 select-text whitespace-pre-wrap text-ui-text">{{ runInfoByMessageId.get(message.id)!.detail }}</p>
+                      <p v-else-if="runInfoByMessageId.get(message.id)!.error" data-execution-detail-body class="my-1.5 select-text whitespace-pre-wrap text-ui-danger">{{ runInfoByMessageId.get(message.id)!.error }}</p>
+                      <p v-if="runInfoByMessageId.get(message.id)!.evidenceAvailability !== 'available'" class="my-1 text-[11px] text-ui-text-faint">{{ evidenceAvailabilityLabel(runInfoByMessageId.get(message.id)!.evidenceAvailability) }}</p>
+                    </template>
+                    <template v-else-if="ticket">
                       <span v-if="hasTicketStatus(ticket.status)">{{ t(`superAgent.status.${ticket.status}`) }}<template v-if="ticket.provider"> · </template></span><span v-if="ticket.provider">{{ providerName(ticket.provider) }}</span>
                       <p class="my-1 select-text whitespace-pre-wrap">{{ ticket.scope }}</p>
                       <p v-if="ticket.latestAcceptance" class="my-1 select-text whitespace-pre-wrap text-sm">{{ t('superAgent.acceptance', { text: ticket.latestAcceptance }) }}</p>
@@ -586,7 +698,8 @@ function canCorrect(message: SuperMessage) {
                     </template>
                     <p v-if="message.reason && message.state !== 'failed' && message.state !== 'uncertain'" class="my-1 select-text whitespace-pre-wrap text-ui-text-muted">{{ message.reason }}</p>
                     <div :class="touchWorkspace && 'workspace-touch-actions'" class="flex flex-wrap items-center gap-x-3 gap-y-1">
-                      <RouterLink v-for="session in sessions" :key="session.id" :to="sessionRoute(session.id)" class="inline-flex items-center text-ui-accent">{{ session.title ? t('superAgent.openTicketSession', { name: session.title }) : t('superAgent.openSession') }}</RouterLink>
+                      <RouterLink v-for="session in visibleSessionsFor(sessions, runInfoByMessageId.get(message.id))" :key="session.id" :to="sessionRoute(session.id)" data-message-open-session class="inline-flex items-center text-ui-accent">{{ session.title ? t('superAgent.openTicketSession', { name: session.title }) : t('superAgent.openSession') }}</RouterLink>
+                      <RouterLink v-if="runInfoByMessageId.get(message.id)?.scheduleId" :to="scheduleRoute(runInfoByMessageId.get(message.id)!.scheduleId!)" data-message-open-schedule class="inline-flex items-center text-ui-accent">{{ t('superAgent.followUp.openSchedule') }}</RouterLink>
                       <button v-if="canCorrect(message)" type="button" class="text-ui-accent" @click="chooseCorrection(message.id)">{{ t('superAgent.correct') }}</button>
                     </div>
                     <form v-if="correcting === message.id" class="mt-2 flex flex-wrap gap-2" @submit.prevent="applyCorrection">
@@ -625,14 +738,14 @@ function canCorrect(message: SuperMessage) {
                   <button v-else-if="message.role === 'user' && message.retryable && !workerFailure" type="button" class="hover:text-ui-accent" @click="showSettings = true">{{ t('superAgent.switchHint') }}</button>
                   <button v-if="message.role === 'user' && message.retryable" type="button" :disabled="busy || (workerMissing && !workers.length)" class="text-ui-accent disabled:text-ui-text-muted" @click="retry(message)">{{ t(workerFailure ? 'superAgent.actions.retryWorker' : 'errors.retry') }}</button>
                   <button v-if="message.targetWorkspaceId" type="button" class="inline-flex items-center gap-1 text-ui-accent" @click="goToProject(message.targetWorkspaceId)">{{ t('superAgent.openWorkspace', { name: workspaceName(message.targetWorkspaceId) }) }}<ArrowRight :size="12" aria-hidden="true" /></button>
-                  <RouterLink v-if="message.provenance?.scheduleId" :to="scheduleRoute(message.provenance.scheduleId)" data-message-open-schedule class="inline-flex items-center text-ui-accent no-underline hover:underline">{{ t('superAgent.followUp.openSchedule') }}</RouterLink>
-                  <RouterLink v-if="message.provenance?.sessionId && message.provenance.evidenceAvailability !== 'deleted'" :to="sessionRoute(message.provenance.sessionId)" data-message-open-session class="inline-flex items-center text-ui-accent no-underline hover:underline">{{ t('superAgent.openSession') }}</RouterLink>
+                  <RouterLink v-if="!runInfoByMessageId.get(message.id) && message.provenance?.scheduleId" :to="scheduleRoute(message.provenance.scheduleId)" data-message-open-schedule class="inline-flex items-center text-ui-accent no-underline hover:underline">{{ t('superAgent.followUp.openSchedule') }}</RouterLink>
+                  <RouterLink v-if="!runInfoByMessageId.get(message.id) && message.provenance?.sessionId && message.provenance.evidenceAvailability !== 'deleted'" :to="sessionRoute(message.provenance.sessionId)" data-message-open-session class="inline-flex items-center text-ui-accent no-underline hover:underline">{{ t('superAgent.openSession') }}</RouterLink>
                 </div>
-                <div v-else-if="message.provenance?.scheduleId || message.provenance?.sessionId" :class="touchWorkspace && 'workspace-touch-actions'" class="mt-1 flex flex-wrap items-center gap-3 text-xs text-ui-text-muted">
+                <div v-else-if="!runInfoByMessageId.get(message.id) && (message.provenance?.scheduleId || message.provenance?.sessionId)" :class="touchWorkspace && 'workspace-touch-actions'" class="mt-1 flex flex-wrap items-center gap-3 text-xs text-ui-text-muted">
                   <span v-if="message.provenance.scheduleTitle">{{ t(message.provenance.sourceKind === 'schedule' ? 'superAgent.followUp.fromSchedule' : 'superAgent.followUp.fromSession', { title: message.provenance.scheduleTitle }) }}</span>
                   <RouterLink v-if="message.provenance.scheduleId" :to="scheduleRoute(message.provenance.scheduleId)" data-message-open-schedule class="inline-flex items-center text-ui-accent no-underline hover:underline">{{ t('superAgent.followUp.openSchedule') }}</RouterLink>
                   <RouterLink v-if="message.provenance.sessionId && message.provenance.evidenceAvailability !== 'deleted'" :to="sessionRoute(message.provenance.sessionId)" data-message-open-session class="inline-flex items-center text-ui-accent no-underline hover:underline">{{ t('superAgent.openSession') }}</RouterLink>
-                  <span v-if="message.provenance.evidenceAvailability && message.provenance.evidenceAvailability !== 'available'">{{ t(message.provenance.evidenceAvailability === 'archived' ? 'superAgent.followUp.evidenceArchived' : message.provenance.evidenceAvailability === 'deleted' ? 'superAgent.followUp.evidenceDeleted' : message.provenance.evidenceAvailability === 'partial' ? 'superAgent.followUp.evidencePartial' : 'superAgent.followUp.evidenceRestricted') }}</span>
+                  <span v-if="message.provenance.evidenceAvailability && message.provenance.evidenceAvailability !== 'available'">{{ evidenceAvailabilityLabel(message.provenance.evidenceAvailability) }}</span>
                 </div>
               </WorkspaceMessage>
             </li>

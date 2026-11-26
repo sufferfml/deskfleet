@@ -677,17 +677,26 @@ export async function processSubscribedSession(
       if (!postTurnSub?.state.enabled || postTurnSub.state.pausedReason) return
       const postTurnAuthVersion = ctx.authVersion(userId)
 
+      const runStatus = turn.state === "completed" ? "completed" as const : turn.state === "interrupted" ? "interrupted" as const : "failed" as const
+      const finishedAt = turn.endedAt ?? now
       let deliveredMessageId: string | undefined
+      let linkedTicketId: string | undefined
       const shouldDeliver = triage.kind !== "record_quietly" && ruleMode !== "shadow"
       if (ruleMode === "shadow" && triage.kind !== "record_quietly") {
         ctx.metrics.shadowDecisions += 1
       } else if (shouldDeliver) {
         const delivery = await deliverToMainChat(ctx, userId, workspaceId, {
           text: triage.summary, sourceKind: "session", sourceId: sessionId,
-          scheduleTitle: snapshot.session.title, sessionId, turnId: turn.id,
+          scheduleTitle: snapshot.session.title,
+          runKey, runStatus,
+          ...(snapshot.session.provider ? { provider: snapshot.session.provider } : {}),
+          ...(triage.detail ? { detail: triage.detail } : {}),
+          startedAt: turn.startedAt, finishedAt,
+          sessionId, turnId: turn.id,
           issueKey: triage.issueKey, evidenceAvailability,
         })
         deliveredMessageId = delivery.messageId
+        linkedTicketId = delivery.ticketId
         ctx.metrics.deliveredRuns += 1
       } else {
         ctx.metrics.quietRuns += 1
@@ -695,10 +704,14 @@ export async function processSubscribedSession(
 
       await ctx.deps.followUpStore.upsertRun({
         userId, workspaceId, sourceKind: "session", sourceId: sessionId, runKey,
-        sessionId, turnId: turn.id, startedAt: turn.startedAt, finishedAt: turn.endedAt ?? now,
-        status: turn.state === "completed" ? "completed" : turn.state === "interrupted" ? "interrupted" : "failed",
-        delivered: shouldDeliver, deliveredMessageId, issueKey: triage.issueKey,
-        summary: triage.summary, error: turn.error, evidenceAvailability,
+        scheduleTitle: snapshot.session.title,
+        ...(snapshot.session.provider ? { provider: snapshot.session.provider } : {}),
+        sessionId, turnId: turn.id, startedAt: turn.startedAt, finishedAt,
+        status: runStatus,
+        delivered: shouldDeliver, deliveredMessageId, ticketId: linkedTicketId, issueKey: triage.issueKey,
+        summary: triage.summary,
+        ...(triage.detail ? { detail: triage.detail } : {}),
+        error: turn.error, evidenceAvailability,
         evidenceRefs: { sessionId, turnId: turn.id, ...(latestPrRefs.length ? { prRefs: latestPrRefs } : {}), ...(commitShas.length ? { commitShas } : {}) },
         createdAt: turn.startedAt, updatedAt: now,
       })
@@ -707,7 +720,7 @@ export async function processSubscribedSession(
         userId, workspaceId, sourceKind: "session", sourceId: sessionId, actionKey, evidenceVersion,
         authVersion: postTurnAuthVersion, actionKind: triage.kind, mode: ruleMode,
         status: ruleMode === "shadow" && triage.kind !== "record_quietly" ? "shadow" : "completed",
-        sessionId, turnId: turn.id, messageId: deliveredMessageId, reason: triage.reason,
+        sessionId, turnId: turn.id, ticketId: linkedTicketId, messageId: deliveredMessageId, reason: triage.reason,
         createdAt: now, updatedAt: now,
       })
 
@@ -884,7 +897,9 @@ export async function checkStalledSession(
   }
 
   const postAuthVersion = ctx.authVersion(userId)
+  const startedAt = runningTurn?.startedAt ?? pendingInput?.createdAt ?? nowIso
   let deliveredMessageId: string | undefined
+  let linkedTicketId: string | undefined
   const shouldDeliver = triage.kind !== "record_quietly" && ruleMode !== "shadow"
   if (ruleMode === "shadow" && triage.kind !== "record_quietly") {
     ctx.metrics.shadowDecisions += 1
@@ -894,6 +909,11 @@ export async function checkStalledSession(
       sourceKind: "session",
       sourceId: sessionId,
       scheduleTitle: snapshot.session.title,
+      runKey,
+      runStatus: "attention",
+      ...(snapshot.session.provider ? { provider: snapshot.session.provider } : {}),
+      ...(triage.detail ? { detail: triage.detail } : {}),
+      startedAt,
       sessionId,
       turnId: runningTurn?.id,
       issueKey: triage.issueKey ?? progress.issueKey,
@@ -901,6 +921,7 @@ export async function checkStalledSession(
       options: triage.options,
     })
     deliveredMessageId = delivery.messageId
+    linkedTicketId = delivery.ticketId
     ctx.metrics.deliveredRuns += 1
   } else {
     ctx.metrics.quietRuns += 1
@@ -908,11 +929,15 @@ export async function checkStalledSession(
 
   await ctx.deps.followUpStore.upsertRun({
     userId, workspaceId, sourceKind: "session", sourceId: sessionId, runKey,
+    scheduleTitle: snapshot.session.title,
+    ...(snapshot.session.provider ? { provider: snapshot.session.provider } : {}),
     sessionId, turnId: runningTurn?.id,
-    startedAt: runningTurn?.startedAt ?? pendingInput?.createdAt ?? nowIso,
-    status: "attention", delivered: shouldDeliver, deliveredMessageId,
+    startedAt,
+    status: "attention", delivered: shouldDeliver, deliveredMessageId, ticketId: linkedTicketId,
     issueKey: triage.issueKey ?? progress.issueKey,
-    summary: triage.summary, error: stallDetail,
+    summary: triage.summary,
+    ...(triage.detail ? { detail: triage.detail } : {}),
+    error: stallDetail,
     evidenceAvailability: "available",
     evidenceRefs: { sessionId, ...(runningTurn?.id ? { turnId: runningTurn.id } : {}) },
     createdAt: runningTurn?.startedAt ?? nowIso, updatedAt: nowIso,
@@ -922,7 +947,7 @@ export async function checkStalledSession(
     userId, workspaceId, sourceKind: "session", sourceId: sessionId, actionKey, evidenceVersion,
     authVersion: postAuthVersion, actionKind: triage.kind, mode: ruleMode,
     status: ruleMode === "shadow" && triage.kind !== "record_quietly" ? "shadow" : "completed",
-    sessionId, turnId: runningTurn?.id, messageId: deliveredMessageId, reason: triage.reason,
+    sessionId, turnId: runningTurn?.id, ticketId: linkedTicketId, messageId: deliveredMessageId, reason: triage.reason,
     createdAt: nowIso, updatedAt: nowIso,
   })
 

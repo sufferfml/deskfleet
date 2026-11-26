@@ -179,7 +179,7 @@ export async function executeSuperScheduleAction(params: {
     const result = await host.setAdoptAllSchedules(true, actor, { deliveryPolicy: action.deliveryPolicy })
     if (result.authorized) {
       const details = [
-        `Enabled **让super agent 接管所有会话** on this machine (covers **all your scheduled tasks** and ordinary project sessions, both existing and future, without selecting them one by one).`,
+        `Enabled **自动跟进会话与定时任务** on this machine (covers **all your scheduled tasks** and ordinary project sessions, both existing and future, without selecting them one by one).`,
         `- Active now: ${result.adoptedCount} owned schedule(s)${result.adoptedSessionCount ? ` and ${result.adoptedSessionCount} ordinary session(s)` : ""}${result.preservedPreferenceCount ? ` (${result.preservedPreferenceCount} preserved existing reporting preferences)` : ""}.`,
         `- Future ordinary sessions (matched by project directory) and schedules created from either the Schedules form or SA will attach automatically without subscribing one by one.`,
       ]
@@ -189,9 +189,9 @@ export async function executeSuperScheduleAction(params: {
       return { text: details.join("\n") }
     }
     const pendingLines = [
-      `Saved your choice for **让super agent 接管所有会话** (covers all your scheduled tasks and ordinary project sessions without selecting them one by one).`,
+      `Saved your choice for **自动跟进会话与定时任务** (covers all your scheduled tasks and ordinary project sessions without selecting them one by one).`,
       `- SA follow-up status: **Waiting for background authorization** (${result.awaitingAuthorizationCount} owned schedule(s) staged; existing preferences preserved).`,
-      `- Required permission: Turn on Settings → Super Agent → **让super agent 接管所有会话** (or click the main-chat authorization banner) to complete **background follow-up authorization on this execution machine**.`,
+      `- Required permission: Turn on Settings → Super Agent → **自动跟进会话与定时任务** (or click the main-chat authorization banner) to complete **background follow-up authorization on this execution machine**.`,
       `- Once authorized, SA will automatically attach to all staged and future schedules and ordinary project sessions without recreating them or selecting one by one. Native schedules continue running on time in the meantime.`,
     ]
     if (result.skippedOtherOwnerCount) {
@@ -205,7 +205,7 @@ export async function executeSuperScheduleAction(params: {
     const result = await host.setAdoptAllSchedules(false, actor)
     return {
       text: [
-        `Turned off **让super agent 接管所有会话** (${result.stoppedCount} schedule(s) paused from SA follow-up, and automatic takeover for ordinary sessions and future schedules is off).`,
+        `Turned off **自动跟进会话与定时任务** (${result.stoppedCount} schedule(s) paused from SA follow-up, and automatic takeover for ordinary sessions and future schedules is off).`,
         `Your existing sessions stay open and native scheduled tasks keep their enabled state, trigger time, and execution target unchanged and will continue running on time.`,
       ].join("\n"),
     }
@@ -396,7 +396,7 @@ export async function executeSuperScheduleAction(params: {
       : awaitingAuthorization
         ? [
             `- Schedule status: **Created** (已创建) — native schedule is active and will run on time.`,
-            `- SA follow-up status: **Waiting for background authorization** (等待授权跟进) — requires **background follow-up authorization on this execution machine** (turn on Settings → Super Agent → **让super agent 接管所有会话**, or click the main-chat authorization banner).`,
+            `- SA follow-up status: **Waiting for background authorization** (等待授权跟进) — requires **background follow-up authorization on this execution machine** (turn on Settings → Super Agent → **自动跟进会话与定时任务**, or click the main-chat authorization banner).`,
             `- Auto-attach: Once authorized, SA will automatically follow this schedule (\`${created.id}\`) with reporting preference "${describePolicy(deliveryPolicy)}" without recreating it or selecting schedules one by one.`,
           ]
         : [`- SA follow-up: Not enabled (native schedule runs on time; view runs in the execution session or Schedules page).`]
@@ -463,7 +463,7 @@ export async function executeSuperScheduleAction(params: {
     return {
       text: authorized
         ? `Subscribed SA follow-up for existing schedule **${targetTask.title}** (\`${targetTask.id}\`), starting from the next run. Reporting: ${describePolicy(policy)}.`
-        : `Staged SA follow-up for **${targetTask.title}** (\`${targetTask.id}\`) as **Waiting for background authorization** (${describePolicy(policy)}). Turn on Settings → Super Agent → **让super agent 接管所有会话** (or click the main-chat authorization banner) to complete background follow-up authorization on this execution machine, and SA will attach automatically without selecting one by one.`,
+        : `Staged SA follow-up for **${targetTask.title}** (\`${targetTask.id}\`) as **Waiting for background authorization** (${describePolicy(policy)}). Turn on Settings → Super Agent → **自动跟进会话与定时任务** (or click the main-chat authorization banner) to complete background follow-up authorization on this execution machine, and SA will attach automatically without selecting one by one.`,
       provenance: {
         origin: "schedule_receipt", sourceKind: "schedule", sourceId: targetTask.id,
         scheduleId: targetTask.id, scheduleTitle: targetTask.title, deliveryPolicy: policy,

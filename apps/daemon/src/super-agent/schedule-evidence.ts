@@ -51,7 +51,7 @@ export interface ScheduleRunEvidence {
   error?: string
 }
 
-const PLACEHOLDER_SUMMARY_RE = /^(?:Running scheduled task "|".*" finished \([^)]+\) while SA (?:follow-up|background follow-up) .*; not pushed to main chat\.|Run completed with no text output\.|".*" finished, but only (?:an opening acknowledgement|progress commentary) was recorded|".*" finished with only an intermediate milestone|This turn includes input from another member|".*" finished, but its execution session was deleted|Partial output captured for "|".*" finished, but its full turn transcript could not be read completely)/u
+const PLACEHOLDER_SUMMARY_RE = /^(?:Running scheduled task "|".*" finished \([^)]+\) while SA (?:follow-up|background follow-up) .*; not pushed to main chat\.|Run completed with no text output\.|「.*」已结束，但(?:未产出正文结论|仅包含非正文内容)|".*" finished, but (?:only (?:an opening acknowledgement|progress commentary) was recorded|no concise conclusion text was extracted)|".*" finished with only an intermediate milestone|This turn includes input from another member|".*" finished, but its execution session was deleted|Partial output captured for "|".*" finished, but its full turn transcript could not be read completely)/u
 
 function isSubstantivePersistedSummary(run: FollowUpRunRecord): boolean {
   const summary = run.summary.trim()

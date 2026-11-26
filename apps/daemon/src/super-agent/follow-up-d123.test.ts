@@ -757,9 +757,9 @@ test("D3b: createCoordinatorTriageModel cleanly falls back when unconfigured or 
 })
 
 // ============================================================================
-// D5a: Daemon main-chat copy uses verbatim "让super agent 接管所有会话" everywhere
+// D5a: Daemon main-chat copy uses verbatim "自动跟进会话与定时任务" everywhere
 // ============================================================================
-test("D5a: adopt_all, stop_all_follow_up, and missing-auth guidance consistently use verbatim '让super agent 接管所有会话'", async t => {
+test("D5a: adopt_all, stop_all_follow_up, and missing-auth guidance consistently use verbatim '自动跟进会话与定时任务'", async t => {
   const dir = await mkdtemp(join(tmpdir(), "deskfleet-d5a-copy-"))
   const project = join(dir, "repo")
   await mkdir(project, { recursive: true })
@@ -779,7 +779,7 @@ test("D5a: adopt_all, stop_all_follow_up, and missing-auth guidance consistently
   // 1. adopt_all before auth
   nextAction = { kind: "schedule", operation: "adopt_all" }
   const adoptPending = await sendMainChat(h, wsId, userA, "接管全部")
-  assert.ok(adoptPending.reply.includes("让super agent 接管所有会话"), "adopt_all pending auth uses verbatim switch name")
+  assert.ok(adoptPending.reply.includes("自动跟进会话与定时任务"), "adopt_all pending auth uses verbatim switch name")
   assert.ok(!adoptPending.reply.includes("Settings → Super Agent → Enable background follow-up"), "no stale Enable background follow-up guidance")
 
   // 2. create schedule before auth
@@ -788,24 +788,24 @@ test("D5a: adopt_all, stop_all_follow_up, and missing-auth guidance consistently
     targetKind: "directory", trigger: { kind: "daily", time: "09:00", timeZone: "Asia/Shanghai" }, deliveryPolicy: "every_run",
   }
   const createNoAuth = await sendMainChat(h, wsId, userA, "每天 9 点巡检")
-  assert.ok(createNoAuth.reply.includes("让super agent 接管所有会话"), "missing-auth create guidance uses verbatim switch name")
+  assert.ok(createNoAuth.reply.includes("自动跟进会话与定时任务"), "missing-auth create guidance uses verbatim switch name")
   assert.ok(!createNoAuth.reply.includes("Settings → Super Agent → Enable background follow-up"))
 
   // 3. adopt single schedule before auth
   const createdTask = h.schedules.snapshot()[0]!
   nextAction = { kind: "schedule", operation: "adopt", scheduleId: createdTask.id }
   const adoptOneNoAuth = await sendMainChat(h, wsId, userA, "跟进这条计划")
-  assert.ok(adoptOneNoAuth.reply.includes("让super agent 接管所有会话"), "missing-auth adopt guidance uses verbatim switch name")
+  assert.ok(adoptOneNoAuth.reply.includes("自动跟进会话与定时任务"), "missing-auth adopt guidance uses verbatim switch name")
 
   // 4. adopt_all after auth & stop_all_follow_up
   await h.enableAuth(userA, "inst-copy", { takeoverAllSessions: true })
   nextAction = { kind: "schedule", operation: "adopt_all" }
   const adoptActive = await sendMainChat(h, wsId, userA, "开启全量接管")
-  assert.ok(adoptActive.reply.includes("让super agent 接管所有会话"))
+  assert.ok(adoptActive.reply.includes("自动跟进会话与定时任务"))
   assert.match(adoptActive.reply, /ordinary project sessions/i)
 
   nextAction = { kind: "schedule", operation: "stop_all_follow_up" }
   const stopAll = await sendMainChat(h, wsId, userA, "停止全部跟进")
-  assert.ok(stopAll.reply.includes("让super agent 接管所有会话"))
+  assert.ok(stopAll.reply.includes("自动跟进会话与定时任务"))
   assert.match(stopAll.reply, /ordinary sessions/i)
 })

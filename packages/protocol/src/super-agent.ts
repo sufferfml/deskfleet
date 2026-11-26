@@ -6,6 +6,7 @@ import type {
   FollowUpAuthReceipt,
   FollowUpAuthSummary,
   FollowUpProvenance,
+  FollowUpRunRecord,
   FollowUpRunsPage,
   FollowUpSourceKind,
   FollowUpSourceRecord,
@@ -179,6 +180,10 @@ export interface SuperSnapshot {
   supportsScheduleCommands?: boolean
   /** Current user's registration-level background follow-up authorization and workspace summary. */
   followUp?: FollowUpAuthSummary
+  /** Recent followed run records belonging to this project workspace, surfaced inside project Tickets. */
+  followUpRuns?: FollowUpRunRecord[]
+  /** Pagination cursor when more historical follow-up runs exist beyond `followUpRuns`. */
+  followUpRunsCursor?: { createdAt: string; id: string }
   pendingRequests?: (SuperWorkerRequest & { ticketId: string; sourceKind?: FollowUpSourceKind; sourceId?: string; sourceTitle?: string })[]
   coordinatorUsage?: SuperCoordinatorUsage
   coordinatorOverrides?: SuperModelSelection

@@ -46,12 +46,14 @@ export function mergeRunRecordMonotonic(
   const existingRank = RUN_STATE_RANK[existing.status]
   const incomingRank = RUN_STATE_RANK[incoming.status]
   if (incomingRank < existingRank || (incomingRank === existingRank && existing.delivered && !incoming.delivered)) {
-    // Preserve terminal / delivered state, summary, messageId, and evidence; only backfill missing IDs.
+    // Preserve terminal / delivered state, summary, detail, messageId, and evidence; only backfill missing IDs.
     return {
       ...structuredClone(existing),
       sessionId: existing.sessionId ?? incoming.sessionId,
       inputId: existing.inputId ?? incoming.inputId,
       turnId: existing.turnId ?? incoming.turnId,
+      provider: existing.provider ?? incoming.provider,
+      detail: existing.detail ?? incoming.detail,
       updatedAt: existing.updatedAt >= incoming.updatedAt ? existing.updatedAt : incoming.updatedAt,
     }
   }
@@ -63,6 +65,8 @@ export function mergeRunRecordMonotonic(
     sessionId: next.sessionId ?? existing.sessionId,
     inputId: next.inputId ?? existing.inputId,
     turnId: next.turnId ?? existing.turnId,
+    provider: next.provider ?? existing.provider,
+    detail: next.detail ?? existing.detail,
     delivered: existing.delivered || next.delivered,
     deliveredMessageId: next.deliveredMessageId ?? existing.deliveredMessageId,
     ticketId: next.ticketId ?? existing.ticketId,

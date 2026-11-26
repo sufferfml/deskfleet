@@ -22,6 +22,7 @@ import {
   type FollowUpMetricsSnapshot,
   type FollowUpPrRef,
   type FollowUpProvenance,
+  type FollowUpRunRecord,
   type FollowUpSourceKind,
 } from "@deskfleet/protocol/super-agent-follow-up"
 import { isTerminalRunStatus, RUN_STATE_RANK, type FollowUpStore } from "./follow-up-store.ts"
@@ -63,6 +64,12 @@ export interface DeliverMainChatPayload {
   scheduleId?: string
   scheduleTitle?: string
   runId?: string
+  runKey?: string
+  runStatus?: FollowUpRunRecord["status"]
+  provider?: string
+  detail?: string
+  startedAt?: string
+  finishedAt?: string
   sessionId?: string
   inputId?: string
   turnId?: string
@@ -117,6 +124,12 @@ export async function deliverToMainChat(
     ...(payload.scheduleId ? { scheduleId: payload.scheduleId } : {}),
     ...(payload.scheduleTitle ? { scheduleTitle: payload.scheduleTitle } : {}),
     ...(payload.runId ? { runId: payload.runId } : {}),
+    ...(payload.runKey ? { runKey: payload.runKey } : {}),
+    ...(payload.runStatus ? { runStatus: payload.runStatus } : {}),
+    ...(payload.provider ? { provider: payload.provider } : {}),
+    ...(payload.detail ? { detail: payload.detail } : {}),
+    ...(payload.startedAt ? { startedAt: payload.startedAt } : {}),
+    ...(payload.finishedAt ? { finishedAt: payload.finishedAt } : {}),
     ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
     ...(payload.inputId ? { inputId: payload.inputId } : {}),
     ...(payload.turnId ? { turnId: payload.turnId } : {}),
@@ -144,24 +157,33 @@ export async function deliverToMainChat(
         return { messageId: existingFinalMsg.id, ticketId: existingFinalMsg.ticketId }
       }
     }
-    // 2. Merge repeated identical issue into its existing active card rather than spamming chat.
+    // 2. Merge repeated identical operational issue (consecutive skip / stall / repeated error) or same run
+    //    into its existing card rather than spamming chat — NEVER overwrite a different completed schedule run's message!
     if (payload.issueKey) {
-      const existingIssue = room.messages.findLast(m => m.provenance?.issueKey === payload.issueKey && m.provenance?.sourceId === payload.sourceId)
+      const isOperationalRepeat = payload.issueKey.startsWith("skip:")
+        || payload.issueKey.startsWith("stall:")
+        || payload.issueKey.startsWith("err:")
+      const existingIssue = room.messages.findLast(m =>
+        m.provenance?.issueKey === payload.issueKey
+        && m.provenance?.sourceId === payload.sourceId
+        && (isOperationalRepeat || !payload.runId || !m.provenance?.runId || m.provenance.runId === payload.runId))
       if (existingIssue) {
         existingIssue.text = payload.text
         existingIssue.provenance = { ...existingIssue.provenance, ...provenance }
         return { messageId: existingIssue.id, ticketId: existingIssue.ticketId }
       }
     }
-    let ticketId: string | undefined
-    if (payload.createTicketTitle && payload.createTicketScope) {
+    let ticketId: string | undefined = payload.sessionId
+      ? room.tickets.find(t => t.sessionId === payload.sessionId)?.id
+      : undefined
+    if (!ticketId && payload.createTicketTitle && payload.createTicketScope) {
       const ticket = {
         id: randomUUID(),
         title: payload.createTicketTitle,
         scope: payload.createTicketScope,
         summary: payload.text.slice(0, 700),
         status: "attention" as const,
-        provider: room.provider,
+        provider: payload.provider || room.provider,
         updatedAt: ctx.nowIso(),
       }
       room.tickets.push(ticket)
@@ -452,10 +474,18 @@ export async function processSchedulePrivateEvent(
       if (existingRun && (isTerminalRunStatus(existingRun.status) || RUN_STATE_RANK[nextStatus] < RUN_STATE_RANK[existingRun.status])) {
         continue
       }
+      const inspectedTask = ctx.deps.schedules?.inspectTask(event.scheduleId)?.task
+      const startProvider = inspectedTask?.target.kind === "new" ? inspectedTask.target.provider : undefined
+      const startTicketId = event.sessionId
+        ? ctx.deps.superStore.get(uid)?.rooms.find(r => r.workspaceId === event.workspaceId)?.tickets.find(t => t.sessionId === event.sessionId)?.id
+        : undefined
       await ctx.deps.followUpStore.upsertRun({
         userId: uid, workspaceId: event.workspaceId, sourceKind: "schedule", sourceId: event.scheduleId,
         runKey, scheduleId: event.scheduleId, scheduleTitle: event.scheduleTitle, runId,
-        sessionId: event.sessionId, inputId: event.inputId, scheduledFor: event.scheduledFor,
+        sessionId: event.sessionId, inputId: event.inputId,
+        ...(startProvider ? { provider: startProvider } : {}),
+        ...(startTicketId ? { ticketId: startTicketId } : {}),
+        scheduledFor: event.scheduledFor,
         startedAt: event.startedAt ?? now, status: nextStatus,
         deliveryPolicy: sub.state.deliveryPolicy, delivered: false,
         summary: `Running scheduled task "${event.scheduleTitle}"`,
@@ -511,6 +541,8 @@ export async function processSchedulePrivateEvent(
     // run_skipped or run_finished
     let outputText = ""
     let turnId: string | undefined
+    const inspectedTask = ctx.deps.schedules?.inspectTask(event.scheduleId)?.task
+    let provider: string | undefined = inspectedTask?.target.kind === "new" ? inspectedTask.target.provider : undefined
     let prRefs: FollowUpPrRef[] = []
     let commitShas: string[] = []
     let evidenceAvailability: FollowUpEvidenceAvailability = event.sessionId ? "available" : "restricted"
@@ -523,6 +555,7 @@ export async function processSchedulePrivateEvent(
     if (event.sessionId) {
       try {
         const snapshot = await ctx.deps.agents.journal.read(event.sessionId)
+        provider = snapshot.session.provider || provider
         if (snapshot.session.archiveState !== "active") evidenceAvailability = "archived"
         const input = event.inputId ? snapshot.inputs.find(i => i.id === event.inputId) : undefined
         const turn = input?.turnId
@@ -627,8 +660,17 @@ export async function processSchedulePrivateEvent(
       effectiveAuthVersion = ctx.authVersion(uid)
     }
 
+    const runStatus: FollowUpRunRecord["status"] = event.kind === "run_skipped"
+      ? "skipped"
+      : (crossUserRestricted ? "restricted" : (event.runState ?? "completed"))
+    const startedAt = event.startedAt ?? now
+    const finishedAt = event.finishedAt ?? now
+    const runDetail = crossUserRestricted ? undefined : triage.detail
+
     let deliveredMessageId: string | undefined
-    let linkedTicketId: string | undefined
+    let linkedTicketId: string | undefined = event.sessionId
+      ? ctx.deps.superStore.get(uid)?.rooms.find(r => r.workspaceId === event.workspaceId)?.tickets.find(t => t.sessionId === event.sessionId)?.id
+      : undefined
     const shouldPostNotice = triage.kind !== "record_quietly"
     const reportDelivered = shouldPostNotice && triage.reportDelivered !== false
 
@@ -638,6 +680,12 @@ export async function processSchedulePrivateEvent(
         scheduleId: event.scheduleId,
         scheduleTitle: event.scheduleTitle,
         runId,
+        runKey,
+        runStatus,
+        ...(provider ? { provider } : {}),
+        ...(runDetail ? { detail: runDetail } : {}),
+        startedAt,
+        finishedAt,
         sessionId: event.sessionId,
         inputId: event.inputId,
         turnId,
@@ -652,7 +700,7 @@ export async function processSchedulePrivateEvent(
         options: triage.options,
       })
       deliveredMessageId = delivery.messageId
-      linkedTicketId = delivery.ticketId
+      linkedTicketId = delivery.ticketId ?? linkedTicketId
       if (reportDelivered) ctx.metrics.deliveredRuns += 1
       else ctx.metrics.quietRuns += 1
     } else {
@@ -662,11 +710,15 @@ export async function processSchedulePrivateEvent(
     await ctx.deps.followUpStore.upsertRun({
       userId: uid, workspaceId: event.workspaceId, sourceKind: "schedule", sourceId: event.scheduleId,
       runKey, scheduleId: event.scheduleId, scheduleTitle: event.scheduleTitle, runId,
-      sessionId: event.sessionId, inputId: event.inputId, turnId, scheduledFor: event.scheduledFor,
-      startedAt: event.startedAt ?? now, finishedAt: event.finishedAt ?? now,
-      status: event.kind === "run_skipped" ? "skipped" : (crossUserRestricted ? "restricted" : (event.runState ?? "completed")),
+      sessionId: event.sessionId, inputId: event.inputId, turnId,
+      ...(provider ? { provider } : {}),
+      scheduledFor: event.scheduledFor,
+      startedAt, finishedAt,
+      status: runStatus,
       deliveryPolicy: sub.state.deliveryPolicy, delivered: reportDelivered, deliveredMessageId, ticketId: linkedTicketId,
-      issueKey: triage.issueKey, summary: triage.summary, error: event.error, evidenceAvailability,
+      issueKey: triage.issueKey, summary: triage.summary,
+      ...(runDetail ? { detail: runDetail } : {}),
+      error: event.error, evidenceAvailability,
       evidenceRefs: {
         ...(event.sessionId ? { sessionId: event.sessionId } : {}),
         ...(event.inputId ? { inputId: event.inputId } : {}),
@@ -674,7 +726,7 @@ export async function processSchedulePrivateEvent(
         ...(prRefs.length ? { prRefs } : {}),
         ...(commitShas.length ? { commitShas } : {}),
       },
-      createdAt: event.startedAt ?? now, updatedAt: now,
+      createdAt: startedAt, updatedAt: now,
     })
 
     await ctx.deps.followUpStore.upsertAction({

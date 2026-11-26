@@ -228,9 +228,9 @@ async function organize(group?: SuperHistoryGroup) {
       </template>
       <p v-else-if="enabled && client.superAgent && followUpChecked && !hostSupportsFollowUp" role="status" class="mx-4 mb-3 text-xs text-ui-text-muted">{{ t("superAgent.followUp.hostUpdateRequired", { machine: machineName }) }}</p>
       <template v-if="enabled && client.superAgent?.history">
-        <SettingsRow :label="t('superAgent.mode.history', { machine: fleet.localDesktopTarget.name })" description-id="workspace-history-description">
+        <SettingsRow :label="t('superAgent.mode.history')" description-id="workspace-history-description">
           <template #description>{{ t("superAgent.mode.historyHint") }}</template>
-          <UiButton size="sm" :disabled="busy" @click="organize()">{{ t(groups === undefined ? "superAgent.mode.organize" : "superAgent.setup.checkAgain") }}</UiButton>
+          <UiButton size="sm" :disabled="busy" @click="organize()">{{ t("superAgent.mode.findUnassigned") }}</UiButton>
         </SettingsRow>
         <p v-if="groups?.length === 0" role="status" class="mx-4 mb-3 text-sm text-ui-text-muted">{{ t("superAgent.mode.empty") }}</p>
         <SettingsRow v-for="group in groups" :key="key(group)" :label="group.paths.join(' · ')">

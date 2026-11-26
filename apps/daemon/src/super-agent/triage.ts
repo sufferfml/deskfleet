@@ -11,6 +11,8 @@ export type TriageDecisionKind = "record_quietly" | "deliver_result" | "suppleme
 export interface TriageDecision {
   kind: TriageDecisionKind
   summary: string
+  /** Bounded execution details / output excerpt for this specific run, shown inside the expanded execution card. */
+  detail?: string
   reason: string
   /** False when the notice informs the user that no formal report/final answer was produced (so run.delivered stays false). */
   reportDelivered?: boolean
@@ -224,14 +226,230 @@ export function looksCleanNoRisk(text: string): boolean {
   return hadCleanSignal
 }
 
-function parseModelDecision(raw: unknown, fallbackSummary: string): TriageDecision | undefined {
+const CJK_RE = /[\u4e00-\u9fff]/u
+const BARE_STATUS_LABEL_RE = /^(?:(?:completed|done|success|succeeded|ok|passed|failed|failure|error|interrupted|cancelled|skipped|running|claimed|attention|restricted|已完成|完成|成功|正常|通过|失败|执行失败|已中断|中断|已跳过|跳过|运行中|需要处理|受限)[\s.。!！·\-—:：]*)+$/iu
+const MARKDOWN_TABLE_SEP_RE = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/mu
+const CONCLUSION_CUE_RE = /(?:最终结论|结论|总结|建议|结果|发现|告警|风险|异常|超标|超时|回归|失败|通过|正常|无异常|无需处理|\b(?:conclusion|summary|verdict|recommend(?:ed|ation)?|result|found|finding|alert|risk|anomaly|failed|passed|healthy|clean)\b)/iu
+const UNFINISHED_CUE_RE = /(?:未完成|尚未|暂缓|待处理|待跟进|待确认|未执行|未运行|未提交|阻塞|跳过|未通过|部分完成|仅完成|冲突|\b(?:unfinished|incomplete|not\s+(?:completed|finished|executed|run|done|merged|installed)|pending|deferred|blocked|remaining|skipped|conflict|partial(?:ly)?)\b)/iu
+const ACTION_CUE_RE = /(?:请|需要(?:你|人工|用户)?(?:确认|决定|审批|处理|排查|修复|操作|介入|跟进|重启|重跑|检查)|建议|立即处理|需确认|待确认|待决定|先修复|先合入|\b(?:please|action\s+required|needs?\s+(?:your\s+)?(?:approval|confirmation|decision|attention|review|action|input)|recommend|should|must|investigate|fix|confirm|approve|rerun|escalate)\b)/iu
+
+function isCjkPrimary(input: Pick<TriageInput, "sourceTitle" | "outputText" | "error">): boolean {
+  return CJK_RE.test(`${input.outputText}\n${input.sourceTitle}\n${input.error ?? ""}`)
+}
+
+function stripMarkdownForSummary(raw: string): string {
+  const lines = raw.replace(/\r\n?/gu, "\n").split("\n")
+  const kept: string[] = []
+  let inFence = false
+  for (const line of lines) {
+    if (/^\s*```/u.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) continue
+    // Drop raw markdown table rows so summaries never paste markdown tables.
+    if (/^\s*\|.*\|\s*$/u.test(line)) continue
+    let cleaned = line
+      .replace(/^\s*#{1,6}\s+/u, "")
+      .replace(/^\s*[-*+]\s+/u, "")
+      .replace(/^\s*\d+\.\s+/u, "")
+      .replace(/\[([^\]]+)\]\([^)]+\)/gu, "$1")
+      .replace(/\*\*([^*]+)\*\*/gu, "$1")
+      .replace(/__([^_]+)__/gu, "$1")
+      .replace(/[`~]+/gu, "")
+      .replace(/\s+/gu, " ")
+      .trim()
+    if (!cleaned) continue
+    // Skip bare separator or pure link-label breadcrumb lines.
+    if (/^[·•\-—–|/\\.,:;!?()[\]\s]+$/u.test(cleaned)) continue
+    kept.push(cleaned)
+  }
+  return kept.join("\n")
+}
+
+function extractUniqueSentences(text: string): string[] {
+  const cleaned = stripMarkdownForSummary(text)
+  if (!cleaned) return []
+  const rawParts = cleaned
+    .split(/(?:\n+|(?<=[。！？!?])|(?<=\.)\s+)/u)
+    .map(part => part.trim())
+    .filter(part => part.length >= 2)
+  const seen = new Set<string>()
+  const unique: string[] = []
+  for (const part of rawParts) {
+    const key = part.toLocaleLowerCase().replace(/\s+/gu, " ")
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(part)
+  }
+  return unique
+}
+
+function clipClause(text: string, maxChars: number, preserveTail = false): string {
+  const normalized = text.replace(/\s+/gu, " ").trim()
+  if (normalized.length <= maxChars) return normalized
+  if (preserveTail && maxChars >= 80) {
+    const headLen = Math.min(60, Math.floor(maxChars * 0.3))
+    const tailLen = maxChars - headLen - 3
+    return `${normalized.slice(0, headLen).trimEnd()} … ${normalized.slice(-tailLen).trimStart()}`
+  }
+  return `${normalized.slice(0, Math.max(20, maxChars - 1)).trimEnd()}…`
+}
+
+function needsDistillation(text: string, input: Pick<TriageInput, "outputTruncated">): boolean {
+  if (input.outputTruncated) return true
+  if (text.length > 240) return true
+  if (MARKDOWN_TABLE_SEP_RE.test(text)) return true
+  if (/^\s*```/mu.test(text)) return true
+  if (/^\s*#{1,6}\s+/mu.test(text)) return true
+  if (/\n\s*\n/u.test(text)) return true
+  if (text.split("\n").filter(line => line.trim()).length > 2) return true
+  return false
+}
+
+/** Build bounded raw execution detail for the expandable execution card (never pasted into collapsed SA summary). */
+export function buildRunExecutionDetail(input: Pick<TriageInput, "outputText" | "error" | "prStatusNote" | "evidenceDeleted">): string | undefined {
+  if (input.evidenceDeleted) return undefined
+  const parts: string[] = []
+  const output = input.outputText.trim()
+  if (output) parts.push(output)
+  const error = input.error?.trim()
+  if (error && (!output || !output.includes(error))) {
+    parts.push(CJK_RE.test(error) ? `错误：${error}` : `Error: ${error}`)
+  }
+  if (input.prStatusNote?.trim()) {
+    parts.push(`PR status: ${input.prStatusNote.trim()}`)
+  }
+  if (!parts.length) return undefined
+  return boundSummaryText(parts.join("\n\n"), 6000)
+}
+
+/**
+ * Deterministically distill a run's actual content into a concise SA summary covering:
+ * conclusion, unfinished/blocked items (when present), and whether user action is needed.
+ * Short single-line factual conclusions stay crisp and unmodified when no model is configured.
+ */
+export function summarizeCompletedRunOutput(input: TriageInput): string {
+  const trimmed = input.outputText.trim()
+  const prSuffix = input.prStatusNote ? `\n\nPR status: ${input.prStatusNote}` : ""
+  if (!trimmed) {
+    return isCjkPrimary(input)
+      ? `「${input.sourceTitle}」已结束，但未产出正文结论（结果未确认）；请打开执行会话核对是否真正完成。`
+      : `Run completed with no text output.`
+  }
+  if (!needsDistillation(trimmed, input)) {
+    return `${trimmed}${prSuffix}`
+  }
+
+  const zh = isCjkPrimary(input)
+  const sentences = extractUniqueSentences(trimmed)
+  if (!sentences.length) {
+    return zh
+      ? `「${input.sourceTitle}」已结束，但仅包含非正文内容，未提取到明确结论；请打开执行会话核对。`
+      : `"${input.sourceTitle}" finished, but no concise conclusion text was extracted; open the execution session to inspect.`
+  }
+
+  // Pick up to 2 highest-signal conclusion sentences (explicit conclusion/verdict/finding preferred,
+  // otherwise opening + concluding sentences so the final verdict at the tail is never lost).
+  const scored = sentences.map((sentence, index) => {
+    let score = 0
+    if (CONCLUSION_CUE_RE.test(sentence)) score += 3
+    if (index === sentences.length - 1) score += 2
+    if (index === 0) score += 1
+    if (sentence.length > 260) score -= 1
+    return { sentence, index, score }
+  })
+  const topConclusion = scored
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, 2)
+    .sort((a, b) => a.index - b.index)
+    .map(item => clipClause(item.sentence, 200, item.index === sentences.length - 1))
+  const conclusionText = topConclusion.join(zh ? " " : " ")
+
+  const unfinished = sentences
+    .filter(s => UNFINISHED_CUE_RE.test(s) && !topConclusion.some(c => c.includes(s.slice(0, 24)) || s.includes(c.slice(0, 24))))
+    .slice(0, 2)
+    .map(s => clipClause(s, 140))
+
+  const hasAction = !looksCleanNoRisk(trimmed) && (
+    ACTION_CUE_RE.test(trimmed) || POSITIVE_ANOMALY_RE.test(trimmed) || NOT_EXECUTED_RE.test(trimmed)
+  )
+  const actionCandidates = hasAction
+    ? sentences.filter(s => ACTION_CUE_RE.test(s) && !topConclusion.some(c => c.includes(s.slice(0, 24)))).slice(0, 1)
+    : []
+
+  const lines: string[] = []
+  if (zh) {
+    lines.push(`**${input.sourceTitle}** 结论：${conclusionText}`)
+    if (unfinished.length) lines.push(`- 未完成 / 待处理：${unfinished.join("；")}`)
+    if (hasAction) {
+      lines.push(actionCandidates.length
+        ? `- 需要你操作：${clipClause(actionCandidates[0]!, 160)}`
+        : `- 需要你操作：发现需要确认或处理的事项，请按上述结论决定后续操作。`)
+    } else {
+      lines.push(`- 是否需要操作：暂无需操作。`)
+    }
+  } else {
+    lines.push(`**${input.sourceTitle}** conclusion: ${conclusionText}`)
+    if (unfinished.length) lines.push(`- Incomplete / remaining: ${unfinished.join("; ")}`)
+    if (hasAction) {
+      lines.push(actionCandidates.length
+        ? `- Action needed: ${clipClause(actionCandidates[0]!, 160)}`
+        : `- Action needed: Review the findings above and decide on the next step.`)
+    } else {
+      lines.push(`- Action needed: None required.`)
+    }
+  }
+  if (input.prStatusNote) lines.push(`- PR: ${input.prStatusNote}`)
+  return lines.join("\n").slice(0, 900)
+}
+
+function buildFailureSummary(input: TriageInput): string {
+  const errText = input.error?.trim() || (input.status === "interrupted" ? "Execution was interrupted before confirmation." : "Execution failed.")
+  const authHint = /delegation|unauthorized|sign.?in|auth|member/iu.test(errText)
+    ? " Re-check sign-in or team authorization and rerun."
+    : ""
+  const lastSuccess = input.lastSuccessAt ? ` Last successful run: ${input.lastSuccessAt}.` : ""
+  const repeatNote = (input.repeatedErrorCount ?? 1) > 1 ? ` (Occurred ${input.repeatedErrorCount} times)` : ""
+  const partialSentences = input.outputText.trim() ? extractUniqueSentences(input.outputText) : []
+  const partialHighlight = partialSentences.length && !errText.includes(partialSentences[0]!)
+    ? clipClause(partialSentences.at(-1)!, 160)
+    : undefined
+  const partialNote = partialHighlight ? ` Partial progress before failure: ${partialHighlight}.` : ""
+  const actionNote = authHint || " Action needed: inspect the execution session and retry or fix the failure."
+  return `"${input.sourceTitle}" did not complete (${input.status}): ${errText}${repeatNote}.${partialNote}${lastSuccess}${actionNote}`
+}
+
+/** Reject bare status labels, verbatim raw report pastes, raw truncation notices, or misleading success claims on failures. */
+export function isLowQualityModelSummary(summary: string, input: TriageInput): boolean {
+  const trimmed = summary.trim()
+  if (!trimmed) return true
+  if (BARE_STATUS_LABEL_RE.test(trimmed)) return true
+  if (/\.\.\.\s*\[output truncated/iu.test(trimmed)) return true
+  if (MARKDOWN_TABLE_SEP_RE.test(trimmed)) return true
+  const rawOutput = input.outputText.trim()
+  if (rawOutput.length > 420) {
+    const normSummary = trimmed.replace(/\s+/gu, " ")
+    const normRaw = rawOutput.replace(/\s+/gu, " ")
+    if (normSummary === normRaw || (normSummary.length > 650 && normRaw.startsWith(normSummary.slice(0, 300)))) {
+      return true
+    }
+  }
+  if ((input.status === "failed" || input.status === "interrupted") && looksCleanNoRisk(trimmed)) {
+    return true
+  }
+  return false
+}
+
+function parseModelDecision(raw: unknown, fallbackSummary: string, input?: TriageInput): TriageDecision | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
   const obj = raw as Record<string, unknown>
   const kind = obj.kind
   if (kind !== "record_quietly" && kind !== "deliver_result" && kind !== "supplement_worker" && kind !== "create_ticket" && kind !== "ask_human") {
     return undefined
   }
-  const summary = typeof obj.summary === "string" && obj.summary.trim() ? obj.summary.trim().slice(0, 4000) : fallbackSummary
+  const rawSummary = typeof obj.summary === "string" && obj.summary.trim() ? obj.summary.trim().slice(0, 4000) : ""
+  const summary = rawSummary && (!input || !isLowQualityModelSummary(rawSummary, input)) ? rawSummary : fallbackSummary
   const reason = typeof obj.reason === "string" && obj.reason.trim() ? obj.reason.trim().slice(0, 1000) : "Coordinator triage"
   const options = Array.isArray(obj.options)
     ? obj.options.filter((item): item is string => typeof item === "string" && !!item.trim()).slice(0, 6)
@@ -262,11 +480,14 @@ export async function triageFollowUpEvent(
   input: TriageInput,
   options: { model?: TriageModel; signal?: AbortSignal } = {},
 ): Promise<TriageDecision> {
+  const detail = buildRunExecutionDetail(input)
+
   // 1. User previously stopped/dismissed this exact issue -> keep quiet unless it's an explicit every_run schedule report.
   if (input.issueKey && input.stoppedIssueKeys?.includes(input.issueKey) && !(input.sourceKind === "schedule" && input.deliveryPolicy === "every_run")) {
     return {
       kind: "record_quietly",
-      summary: input.error || input.outputText.slice(0, 600) || "Repeated signal suppressed after user stop.",
+      summary: input.error || summarizeCompletedRunOutput(input) || "Repeated signal suppressed after user stop.",
+      ...(detail ? { detail } : {}),
       reason: "User explicitly stopped this issue",
       issueKey: input.issueKey,
     }
@@ -277,6 +498,7 @@ export async function triageFollowUpEvent(
     return {
       kind: "ask_human",
       summary: input.pendingQuestionText || `Execution session "${input.sourceTitle}" is waiting for permission approval.`,
+      ...(detail ? { detail } : {}),
       reason: "Explicit permission request requires human approval",
       issueKey: input.issueKey,
     }
@@ -288,6 +510,7 @@ export async function triageFollowUpEvent(
       return {
         kind: "deliver_result",
         summary: `Scheduled task "${input.sourceTitle}" was skipped ${input.consecutiveSkips} consecutive times because a previous run is still active.${input.lastSuccessAt ? ` Last successful run: ${input.lastSuccessAt}.` : ""}`,
+        ...(detail ? { detail } : {}),
         reason: "Consecutive overlap skips caused missed scheduled delivery",
         issueKey: input.issueKey ?? `skip:${input.workspaceId}:${input.sourceId}`,
       }
@@ -295,22 +518,47 @@ export async function triageFollowUpEvent(
     return {
       kind: "record_quietly",
       summary: input.error || "Skipped overlapping scheduled run.",
+      ...(detail ? { detail } : {}),
       reason: "Single overlap skip recorded in history",
       issueKey: input.issueKey,
     }
   }
 
-  // 4. Execution failures / interruptions: NEVER report as "no risk".
+  // 4. Execution failures / interruptions: NEVER report as "no risk" or silence to record_quietly.
   if (input.status === "failed" || input.status === "interrupted") {
-    const errText = input.error?.trim() || (input.status === "interrupted" ? "Execution was interrupted before confirmation." : "Execution failed.")
-    const authHint = /delegation|unauthorized|sign.?in|auth|member/iu.test(errText)
-      ? " Re-check sign-in or team authorization and rerun."
-      : ""
-    const lastSuccess = input.lastSuccessAt ? ` Last successful run: ${input.lastSuccessAt}.` : ""
-    const repeatNote = (input.repeatedErrorCount ?? 1) > 1 ? ` (Occurred ${input.repeatedErrorCount} times)` : ""
+    const fallbackFailure = buildFailureSummary(input)
+    if (options.model) {
+      try {
+        const raw = await options.model({
+          kind: "follow_up_triage",
+          sourceKind: input.sourceKind,
+          sourceTitle: input.sourceTitle,
+          status: input.status,
+          deliveryPolicy: input.deliveryPolicy,
+          error: input.error,
+          outputText: boundSummaryText(input.outputText.trim(), 6000),
+          lastSuccessAt: input.lastSuccessAt,
+          repeatedErrorCount: input.repeatedErrorCount,
+          prStatusNote: input.prStatusNote,
+        }, options.signal)
+        const parsed = parseModelDecision(raw, fallbackFailure, input)
+        if (parsed) {
+          const safeKind = parsed.kind === "ask_human" || parsed.kind === "create_ticket" ? parsed.kind : "deliver_result"
+          return {
+            ...parsed,
+            kind: safeKind,
+            ...(detail ? { detail } : {}),
+            issueKey: parsed.issueKey ?? input.issueKey,
+          }
+        }
+      } catch {
+        // Model unavailable: fall back to deterministic failure summary below.
+      }
+    }
     return {
       kind: "deliver_result",
-      summary: `"${input.sourceTitle}" did not complete (${input.status}): ${errText}${repeatNote}.${lastSuccess}${authHint}`,
+      summary: fallbackFailure,
+      ...(detail ? { detail } : {}),
       reason: "Incomplete or failed execution must surface clearly",
       issueKey: input.issueKey,
     }
@@ -333,8 +581,8 @@ export async function triageFollowUpEvent(
             relatedSeparateRefs: input.relatedSeparateRefs,
             prStatusNote: input.prStatusNote,
           }, options.signal)
-          const parsed = parseModelDecision(raw, input.pendingQuestionText)
-          if (parsed) return parsed
+          const parsed = parseModelDecision(raw, input.pendingQuestionText, input)
+          if (parsed) return { ...parsed, ...(detail ? { detail } : {}) }
         } catch {
           // Graceful degradation: fall back to deterministic cross-worker handling below.
         }
@@ -345,6 +593,7 @@ export async function triageFollowUpEvent(
         return {
           kind: "supplement_worker",
           summary: `Supplemented "${input.sourceTitle}" with verified context from ${input.crossWorkerMatches.map(m => `${m.prRef.owner}/${m.prRef.repo}#${m.prRef.number}`).join(", ")}.`,
+          ...(detail ? { detail } : {}),
           supplementText: `Verified context from another Worker on the same PR and objective:\n${cited}`,
           reason: "Verified cross-Worker evidence answers the factual blocker",
           issueKey: input.issueKey,
@@ -353,6 +602,7 @@ export async function triageFollowUpEvent(
       return {
         kind: "ask_human",
         summary: `${input.pendingQuestionText}\n\nVerified context:\n${cited}`,
+        ...(detail ? { detail } : {}),
         reason: "Product or policy decision requires human choice",
         issueKey: input.issueKey,
       }
@@ -360,6 +610,7 @@ export async function triageFollowUpEvent(
     return {
       kind: "ask_human",
       summary: input.pendingQuestionText,
+      ...(detail ? { detail } : {}),
       reason: "Worker asked a question requiring human input",
       issueKey: input.issueKey,
     }
@@ -367,10 +618,11 @@ export async function triageFollowUpEvent(
 
   // 5b. Sustained silent stall on a running ordinary Worker without a pending question or approval.
   if (input.status === "attention") {
-    const detail = input.error?.trim() || "No new progress events were recorded across consecutive periodic checks."
+    const stallDetail = input.error?.trim() || "No new progress events were recorded across consecutive periodic checks."
     return {
       kind: "ask_human",
-      summary: `"${input.sourceTitle}" appears stalled: ${detail}`,
+      summary: `"${input.sourceTitle}" appears stalled: ${stallDetail}`,
+      ...(detail ? { detail } : {}),
       reason: "Worker showed no progress across consecutive periodic checks",
       issueKey: input.issueKey ?? `stall:${input.workspaceId}:${input.sourceId}`,
       options: ["Open execution session to inspect", "Continue waiting", "Stop following this stall alert"],
@@ -386,44 +638,41 @@ export async function triageFollowUpEvent(
     if (input.sourceKind === "session") {
       return {
         kind: "record_quietly",
-        summary: deletedSummary.slice(0, 4000),
+        summary: deletedSummary.slice(0, 1000),
         reason: "Execution session was confirmed deleted",
       }
     }
     return {
       kind: input.deliveryPolicy === "every_run" ? "deliver_result" : "record_quietly",
-      summary: deletedSummary.slice(0, 4000),
+      summary: deletedSummary.slice(0, 1000),
       reason: "Execution session was confirmed deleted; surfaced clearly instead of reporting empty output",
       issueKey: input.issueKey ?? `deleted:${input.workspaceId}:${input.sourceId}:${input.runKey}`,
     }
   }
 
   if (input.evidenceIncomplete) {
-    const incompleteSummary = trimmedOutput
-      ? `Partial output captured for "${input.sourceTitle}" (full transcript exceeded read limit; open the original execution session for complete details):\n\n${trimmedOutput}${prSuffix}`
+    const partialHighlight = trimmedOutput ? clipClause(extractUniqueSentences(trimmedOutput).slice(-2).join(" ") || trimmedOutput, 220) : ""
+    const incompleteSummary = partialHighlight
+      ? `Partial output captured for "${input.sourceTitle}" (full transcript exceeded read limit; final conclusion is unconfirmed — open the original execution session to verify): ${partialHighlight}${prSuffix}`
       : `"${input.sourceTitle}" finished, but its full turn transcript could not be read completely. Open the original execution session to inspect the complete output.${prSuffix}`
     if (input.sourceKind === "session") {
       return {
         kind: "record_quietly",
         reportDelivered: false,
-        summary: incompleteSummary.slice(0, 4000),
+        summary: incompleteSummary.slice(0, 1000),
+        ...(detail ? { detail } : {}),
         reason: "Ordinary session transcript was only partially read; preserved link to original session",
       }
     }
     return {
       kind: "deliver_result",
       reportDelivered: false,
-      summary: incompleteSummary.slice(0, 4000),
+      summary: incompleteSummary.slice(0, 1000),
+      ...(detail ? { detail } : {}),
       reason: "Scheduled turn transcript was incomplete; surfaced with link to original session instead of treating as empty/clean",
       issueKey: input.issueKey ?? `partial:${input.workspaceId}:${input.sourceId}:${input.runKey}`,
     }
   }
-
-  const truncatedSuffix = input.outputTruncated
-    ? "\n\n[Note: Output exceeded capture limit; showing the concluding portion. Open the original execution session for the complete log.]"
-    : ""
-  const summaryBase = trimmedOutput || "Run completed with no text output."
-  const combinedSuffix = truncatedSuffix + prSuffix
 
   // Guard against treating opening acknowledgements, progress commentary, or partial milestones
   // as a delivered formal report when no final conclusion was produced.
@@ -434,37 +683,38 @@ export async function triageFollowUpEvent(
       return {
         kind: "record_quietly",
         reportDelivered: false,
-        summary: missingConclusionSummary.slice(0, 4000),
+        summary: missingConclusionSummary.slice(0, 1000),
+        ...(detail ? { detail } : {}),
         reason: `Ordinary session turn ended with only ${stageLabel} and no formal final conclusion`,
       }
     }
     return {
       kind: "deliver_result",
       reportDelivered: false,
-      summary: missingConclusionSummary.slice(0, 4000),
+      summary: missingConclusionSummary.slice(0, 1000),
+      ...(detail ? { detail } : {}),
       reason: `Scheduled run ended with only ${stageLabel} and no formal final conclusion`,
       issueKey: input.issueKey ?? `no-final:${input.workspaceId}:${input.sourceId}:${input.runKey}`,
     }
   }
 
   if (input.outputSource === "milestone") {
-    const milestoneSummary = boundSummaryText(
-      `"${input.sourceTitle}" finished with only an intermediate milestone and no formal final conclusion (open the original execution session to inspect the full log):\n\n${summaryBase}`,
-      4000,
-      combinedSuffix,
-    )
+    const milestoneHighlight = clipClause(extractUniqueSentences(trimmedOutput).slice(-2).join(" ") || trimmedOutput, 220)
+    const milestoneSummary = `"${input.sourceTitle}" finished with only an intermediate milestone and no formal final conclusion (open the original execution session to verify): ${milestoneHighlight}${prSuffix}`
     if (input.sourceKind === "session") {
       return {
         kind: "record_quietly",
         reportDelivered: false,
-        summary: milestoneSummary,
+        summary: milestoneSummary.slice(0, 1000),
+        ...(detail ? { detail } : {}),
         reason: "Ordinary session turn ended with only an intermediate milestone and no formal final conclusion",
       }
     }
     return {
       kind: "deliver_result",
       reportDelivered: false,
-      summary: milestoneSummary,
+      summary: milestoneSummary.slice(0, 1000),
+      ...(detail ? { detail } : {}),
       reason: "Scheduled run ended with only an intermediate milestone and no formal final conclusion",
       issueKey: input.issueKey ?? `milestone-only:${input.workspaceId}:${input.sourceId}:${input.runKey}`,
     }
@@ -476,52 +726,64 @@ export async function triageFollowUpEvent(
     return {
       kind: "deliver_result",
       reportDelivered: false,
-      summary: boundSummaryText(summaryBase, 4000, combinedSuffix),
+      summary: `Run completed with no text output.${prSuffix}`,
       reason: "Scheduled run completed without any text output; no report was produced",
       issueKey: input.issueKey ?? `no-output:${input.workspaceId}:${input.sourceId}:${input.runKey}`,
     }
   }
 
+  const distilledSummary = summarizeCompletedRunOutput(input)
+
   // Ordinary session normal completion: record quietly by default unless model/evidence indicates a concrete actionable issue.
   if (input.sourceKind === "session") {
     return {
       kind: "record_quietly",
-      summary: boundSummaryText(summaryBase, 4000, combinedSuffix),
+      summary: distilledSummary,
+      ...(detail ? { detail } : {}),
       reason: "Ordinary session turn completed normally; recorded for on-demand query",
     }
   }
 
   // Schedule completed run: apply user's delivery policy.
   if (input.deliveryPolicy === "every_run") {
-    if (options.model && !looksCleanNoRisk(summaryBase)) {
+    if (options.model) {
       try {
         const raw = await options.model({
           kind: "follow_up_triage",
           sourceKind: "schedule",
           sourceTitle: input.sourceTitle,
+          status: input.status,
           deliveryPolicy: input.deliveryPolicy,
-          outputText: boundSummaryText(summaryBase, 6000),
+          outputText: boundSummaryText(trimmedOutput, 6000),
           prStatusNote: input.prStatusNote,
         }, options.signal)
-        const parsed = parseModelDecision(raw, boundSummaryText(summaryBase, 4000, combinedSuffix))
-        if (parsed && parsed.kind !== "record_quietly") return parsed
+        const parsed = parseModelDecision(raw, distilledSummary, input)
+        if (parsed) {
+          return {
+            ...parsed,
+            kind: parsed.kind === "record_quietly" ? "deliver_result" : parsed.kind,
+            ...(detail ? { detail } : {}),
+          }
+        }
       } catch {
-        // Model unavailable: deliver deterministic summary so every_run never silently drops.
+        // Model unavailable: deliver deterministic SA summary so every_run never silently drops.
       }
     }
     return {
       kind: "deliver_result",
-      summary: boundSummaryText(summaryBase, 4000, combinedSuffix),
+      summary: distilledSummary,
+      ...(detail ? { detail } : {}),
       reason: "Scheduled delivery policy is every_run",
       issueKey: input.issueKey,
     }
   }
 
-  // exceptions_only schedule: clean/no-change runs stay quiet; potential anomalies invoke triage model if available.
-  if (!input.outputTruncated && looksCleanNoRisk(summaryBase)) {
+  // exceptions_only schedule: clean/no-change runs stay quiet without model calls; potential anomalies invoke triage model if available.
+  if (!input.outputTruncated && looksCleanNoRisk(trimmedOutput)) {
     return {
       kind: "record_quietly",
-      summary: boundSummaryText(summaryBase, 4000, combinedSuffix),
+      summary: distilledSummary,
+      ...(detail ? { detail } : {}),
       reason: "No anomalies detected under exceptions_only policy",
     }
   }
@@ -532,12 +794,13 @@ export async function triageFollowUpEvent(
         kind: "follow_up_triage",
         sourceKind: "schedule",
         sourceTitle: input.sourceTitle,
+        status: input.status,
         deliveryPolicy: input.deliveryPolicy,
-        outputText: boundSummaryText(summaryBase, 6000),
+        outputText: boundSummaryText(trimmedOutput, 6000),
         prStatusNote: input.prStatusNote,
       }, options.signal)
-      const parsed = parseModelDecision(raw, boundSummaryText(summaryBase, 4000, combinedSuffix))
-      if (parsed) return parsed
+      const parsed = parseModelDecision(raw, distilledSummary, input)
+      if (parsed) return { ...parsed, ...(detail ? { detail } : {}) }
     } catch {
       // Model unavailable: surface the anomaly deterministically so real issues are never missed.
     }
@@ -545,9 +808,10 @@ export async function triageFollowUpEvent(
 
   return {
     kind: "deliver_result",
-    summary: boundSummaryText(summaryBase, 4000, combinedSuffix),
+    summary: distilledSummary,
+    ...(detail ? { detail } : {}),
     reason: "Potential finding detected under exceptions_only policy",
-    issueKey: input.issueKey ?? `finding:${input.workspaceId}:${input.sourceId}:${computeEvidenceVersion([summaryBase.slice(0, 300)])}`,
+    issueKey: input.issueKey ?? `finding:${input.workspaceId}:${input.sourceId}:${computeEvidenceVersion([trimmedOutput.slice(0, 300)])}`,
   }
 }
 
@@ -634,10 +898,12 @@ export function createCoordinatorTriageModel(deps: CoordinatorTriageModelDeps): 
       const wrappedPacket = {
         mode: "background_follow_up_triage",
         message: [
-          "Evaluate the untrusted follow-up triage payload in `triage` and decide whether to stay quiet or notify the user.",
+          "You are the project Super Agent — the user's sole direct window for followed runs. Evaluate the untrusted payload in `triage` and decide whether to stay quiet or summarize the run for the user.",
           "Never request evidence, never call tools, and never dispatch a worker.",
           "Return exactly one `answer` action whose `text` is ONLY a single raw JSON object (no prose, no markdown fences) matching:",
-          '{"kind":"record_quietly"|"deliver_result"|"supplement_worker"|"create_ticket"|"ask_human","summary":"concise user-facing summary in the language of the report","reason":"short factual basis","issueKey":"optional stable issue key"}',
+          '{"kind":"record_quietly"|"deliver_result"|"supplement_worker"|"create_ticket"|"ask_human","summary":"concise SA summary in the language of the report","reason":"short factual basis","issueKey":"optional stable issue key"}',
+          "Requirements for `summary`: synthesize based strictly on THIS run's actual content, clearly covering (1) what conclusion was reached, (2) what is incomplete/failed/unverified (if any), and (3) whether user action or decision is needed. NEVER use a bare status label, NEVER paste the full raw report or markdown tables verbatim, and NEVER output raw truncation boilerplate — full details stay in the expandable execution card.",
+          'For status="failed" or "interrupted", NEVER choose "record_quietly" and NEVER report the run as clean or succeeded.',
           'Under deliveryPolicy="exceptions_only", choose kind="record_quietly" ONLY when the entire report is clearly normal/within thresholds with no anomaly, failure, risk, or needed action; otherwise choose kind="deliver_result" (or "ask_human" if a user choice is needed) highlighting the exact anomaly or metric breach.',
         ].join("\n"),
         triage: packet,

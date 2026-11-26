@@ -166,6 +166,15 @@ export class SuperAgentService {
         if (!seen.has(key)) { seen.add(key); snapshot.pendingRequests.push(extra) }
       }
       snapshot.followUp = this.#deps.followUp.authSummary(uid, workspaceId)
+      if (workspaceId !== null) {
+        try {
+          const runsPage = await this.#deps.followUp.listRuns({ userId: uid, workspaceId, limit: 50 })
+          snapshot.followUpRuns = runsPage.runs
+          if (runsPage.nextCursor) snapshot.followUpRunsCursor = runsPage.nextCursor
+        } catch {
+          // Non-fatal: older/test stubs may omit listRuns; snapshot still returns normally.
+        }
+      }
     }
     if (coordinator) {
       snapshot.coordinatorOverrides = state?.coordinatorOverrides?.[coordinator.id] ?? {}

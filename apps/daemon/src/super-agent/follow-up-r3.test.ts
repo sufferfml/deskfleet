@@ -364,14 +364,18 @@ test("R3 20-P1: every_run delivers complete explicit final_answer over long or s
   assert.equal(hist2.delivered, true)
   assert.equal(hist2.summary, finalConclusion)
 
-  // Run 3: Untagged >4,300 chars -> still preserves concluding answer + explicit truncation/session range note!
+  // Run 3: Untagged >4,300 chars -> main chat gets concise SA summary (no raw truncation paste!),
+  // while expandable detail keeps the bounded execution log preserving the concluding answer!
   const msgs3 = snap.messages.filter(m => m.provenance?.runId === rUntaggedLong.id)
   assert.equal(msgs3.length, 1)
-  assert.ok(msgs3[0]!.text.includes(finalConclusion), "Untagged long output must still preserve concluding answer")
-  assert.match(msgs3[0]!.text, /truncated.*original execution session/i)
+  assert.ok(msgs3[0]!.text.includes(finalConclusion), "Untagged long output summary must still preserve concluding answer")
+  assert.ok(msgs3[0]!.text.length < 1000, "Main chat must receive concise SA summary rather than pasting 4,000 chars of raw logs")
+  assert.doesNotMatch(msgs3[0]!.text, /\[output truncated/i, "Main chat SA summary must not use raw truncation marker")
+  assert.ok(msgs3[0]!.provenance?.detail?.includes(finalConclusion), "Expandable detail preserves concluding answer")
   const hist3 = history.runs.find(r => r.runId === rUntaggedLong.id)!
   assert.equal(hist3.delivered, true)
   assert.equal(hist3.summary, msgs3[0]!.text)
+  assert.ok(hist3.detail?.includes(finalConclusion), "Persisted run detail preserves concluding answer")
 })
 
 // ============================================================================

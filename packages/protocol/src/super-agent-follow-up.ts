@@ -211,6 +211,7 @@ export interface FollowUpRunRecord {
   sessionId?: string
   inputId?: string
   turnId?: string
+  provider?: string
   scheduledFor?: string
   startedAt: string
   finishedAt?: string
@@ -221,6 +222,8 @@ export interface FollowUpRunRecord {
   ticketId?: string
   issueKey?: string
   summary: string
+  /** Bounded execution details / output excerpt for this specific run, layered beneath the SA summary. */
+  detail?: string
   error?: string
   evidenceAvailability: FollowUpEvidenceAvailability
   evidenceRefs?: {
@@ -266,6 +269,13 @@ export interface FollowUpProvenance {
   scheduleId?: string
   scheduleTitle?: string
   runId?: string
+  runKey?: string
+  runStatus?: FollowUpRunRecord["status"]
+  provider?: string
+  /** Bounded execution details for this specific run, shown when the SA execution card is expanded. */
+  detail?: string
+  startedAt?: string
+  finishedAt?: string
   sessionId?: string
   inputId?: string
   turnId?: string

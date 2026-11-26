@@ -96,7 +96,7 @@ test("A9/M5 client follow-up service handles offline revocation, reconnect sync-
   expect(hasPendingFollowUpRevocation(scope)).toBe(false)
 })
 
-test("Unified Settings Switch: renders single '让super agent 接管所有会话' switch, removes old entries/list, keeps OFF on auth failure, and stops cleanly", async () => {
+test("Unified Settings Switch & Copy: renders '自动跟进会话与定时任务', '将未归属的会话整理到项目', '查找未归属会话', and '没有需要整理的会话' while keeping existing behavior", async () => {
   const pinia = createPinia()
   setActivePinia(pinia)
   i18n.global.locale.value = "zh-cmn-Hans-CN"
@@ -153,11 +153,12 @@ test("Unified Settings Switch: renders single '让super agent 接管所有会话
     adoptableSessions: [{ id: "sess-old", title: "Active worker", workspaceId: "ws-1", updatedAt: "2026-11-23T00:00:00Z", lastEventSeq: "10" }],
   }))
 
+  const history = vi.fn(async () => ({ links: {}, groups: [] }))
   useWorkspaceAgentMode().value = true
   const api = {
     ...getClient(),
     superAgent: {
-      snapshot: vi.fn(), send: vi.fn(), correct: vi.fn(), settings: vi.fn(),
+      snapshot: vi.fn(), send: vi.fn(), correct: vi.fn(), settings: vi.fn(), history,
       followUpAuth, followUpSources, followUpUpdateSource: vi.fn(), followUpRuns: vi.fn(),
     },
   }
@@ -167,14 +168,29 @@ test("Unified Settings Switch: renders single '让super agent 接管所有会话
   cleanup.push(() => { wrapper.unmount(); disposePinia(pinia) })
   await flushPromises()
 
-  // 1. Verbatim label "让super agent 接管所有会话" and ONLY ONE follow-up switch (no old entries, no adopt-all button, no per-session list!)
-  expect(wrapper.text()).toContain("让super agent 接管所有会话")
+  // 1. Verbatim 4 Settings strings and ONLY ONE follow-up switch (no old entries, no adopt-all button, no per-session list!)
+  expect(wrapper.text()).toContain("自动跟进会话与定时任务")
+  expect(wrapper.text()).toContain("将未归属的会话整理到项目")
+  expect(wrapper.text()).toContain("查找未归属会话")
+  expect(wrapper.text()).not.toContain("让super agent 接管所有会话")
+  expect(wrapper.text()).not.toContain("的历史会话")
+  expect(wrapper.text()).not.toContain("重新检查")
   expect(wrapper.find("[data-follow-up-takeover-all]").exists()).toBe(true)
   expect(wrapper.find("[data-follow-up-enable]").exists()).toBe(false)
   expect(wrapper.find("[data-follow-up-stop-all]").exists()).toBe(false)
   expect(wrapper.find("[data-follow-up-adopt-all]").exists()).toBe(false)
   expect(wrapper.text()).not.toContain("接管全部定时任务")
   expect(wrapper.text()).not.toContain("Active worker")
+  // Clicking "查找未归属会话" preserves history lookup behavior and renders exact empty state "没有需要整理的会话"
+  const findBtn = wrapper.findAll("button").find(b => b.text() === "查找未归属会话")
+  expect(findBtn?.exists()).toBe(true)
+  await findBtn!.trigger("click")
+  await flushPromises()
+  expect(history).toHaveBeenCalledWith({ view: "groups", assign: undefined })
+  expect(wrapper.text()).toContain("没有需要整理的会话")
+  expect(wrapper.text()).not.toContain("没有需要整理的目录会话")
+  expect(wrapper.findAll("button").some(b => b.text() === "查找未归属会话")).toBe(true)
+  expect(wrapper.text()).not.toContain("重新检查")
   // Default OFF on upgraded Mac even when authorized === true!
   expect(wrapper.get("[data-follow-up-takeover-all]").attributes("aria-checked")).toBe("false")
 
@@ -892,7 +908,7 @@ test("R2 14-P1 client AccountShell: classic device that never enabled SA sends Z
   expect(listPendingRevocationsForAccount(serverUrl, "user-a")).toEqual([])
 })
 
-test("D5a copy: WorkspaceAgentView main-chat consent and pending-auth banners use verbatim '让super agent 接管所有会话' in zh-cmn-Hans-CN", async () => {
+test("D5a copy: WorkspaceAgentView main-chat consent and pending-auth banners use verbatim '自动跟进会话与定时任务' in zh-cmn-Hans-CN", async () => {
   const prevLocale = i18n.global.locale.value
   i18n.global.locale.value = "zh-cmn-Hans-CN"
   cleanup.push(() => { i18n.global.locale.value = prevLocale })
@@ -949,14 +965,280 @@ test("D5a copy: WorkspaceAgentView main-chat consent and pending-auth banners us
 
   // 1. Standard consent banner
   const consentBanner = (await mountBanner(0)).get("[data-follow-up-consent-banner]")
-  expect(consentBanner.get("[data-follow-up-consent-enable]").text()).toBe("让super agent 接管所有会话")
-  expect(consentBanner.text()).toContain("让super agent 接管所有会话")
+  expect(consentBanner.get("[data-follow-up-consent-enable]").text()).toBe("自动跟进会话与定时任务")
+  expect(consentBanner.text()).toContain("自动跟进会话与定时任务")
   expect(consentBanner.text()).toContain("无需逐条选择")
   expect(consentBanner.text()).not.toContain("在 localhost 上开启后台跟进")
 
   // 2. Pending-auth banner (SA created schedule before authorization)
   const pendingBanner = (await mountBanner(2)).get("[data-follow-up-consent-banner]")
-  expect(pendingBanner.get("[data-follow-up-consent-enable]").text()).toBe("让super agent 接管所有会话")
-  expect(pendingBanner.text()).toContain("让super agent 接管所有会话")
+  expect(pendingBanner.get("[data-follow-up-consent-enable]").text()).toBe("自动跟进会话与定时任务")
+  expect(pendingBanner.text()).toContain("自动跟进会话与定时任务")
   expect(pendingBanner.text()).toContain("无需重建或逐条选择")
+})
+
+test("Follow-up UI redesign: top bar removes standalone panel, integrates runs into 事项 without duplicates or cross-run mixups, and layers SA summary vs expandable execution details", async () => {
+  const prevLocale = i18n.global.locale.value
+  i18n.global.locale.value = "zh-cmn-Hans-CN"
+  cleanup.push(() => { i18n.global.locale.value = prevLocale })
+
+  const pinia = createPinia()
+  setActivePinia(pinia)
+  const snap: SuperSnapshot = {
+    workspaceId: "ws-1",
+    provider: "codex",
+    workerProviders: [{ id: "codex", name: "Codex" }, { id: "antigravity", name: "Antigravity" }],
+    supportsProactiveFollowUp: true,
+    supportsScheduleCommands: true,
+    followUp: {
+      authorized: true, authVersion: 2, globalDisabled: false,
+      activeDeviceCount: 1, devices: [], autoEnrollOrdinarySessions: true,
+      ordinarySessionRuleMode: "active", takeoverAllSessions: true, adoptAllSchedules: true,
+      pendingAuthScheduleCount: 0, needsConsent: false,
+      subscribedScheduleCount: 2, subscribedSessionCount: 0, pendingTriageCount: 0,
+    },
+    tickets: [
+      {
+        id: "ticket-existing",
+        title: "修复登录回调",
+        scope: "跟踪登录回调异常并验证修复",
+        summary: "已修复并验证",
+        provider: "codex",
+        sessionId: "sess-ticket",
+        updatedAt: "2026-11-26T08:00:00Z",
+      },
+    ],
+    followUpRuns: [
+      {
+        id: "run-rec-linked",
+        userId: "u1",
+        workspaceId: "ws-1",
+        sourceKind: "schedule",
+        sourceId: "sched-login",
+        runKey: "run:r-linked",
+        scheduleId: "sched-login",
+        scheduleTitle: "登录回归巡检",
+        runId: "r-linked",
+        sessionId: "sess-ticket",
+        provider: "codex",
+        startedAt: "2026-11-26T08:30:00Z",
+        finishedAt: "2026-11-26T08:31:00Z",
+        status: "completed",
+        deliveryPolicy: "every_run",
+        delivered: true,
+        deliveredMessageId: "msg-linked",
+        ticketId: "ticket-existing",
+        summary: "登录回归巡检已完成：回调全部通过，暂无需操作。",
+        detail: "LOGIN_LINKED_RAW_DETAIL_200_OK",
+        evidenceAvailability: "available",
+        createdAt: "2026-11-26T08:30:00Z",
+        updatedAt: "2026-11-26T08:31:00Z",
+      },
+      {
+        id: "run-rec-2",
+        userId: "u1",
+        workspaceId: "ws-1",
+        sourceKind: "schedule",
+        sourceId: "sched-update",
+        runKey: "run:r-2",
+        scheduleId: "sched-update",
+        scheduleTitle: "检查 deskfleet 更新",
+        runId: "r-2",
+        sessionId: "sess-run-2",
+        provider: "antigravity",
+        startedAt: "2026-11-26T10:00:00Z",
+        finishedAt: "2026-11-26T10:02:00Z",
+        status: "failed",
+        deliveryPolicy: "every_run",
+        delivered: true,
+        deliveredMessageId: "msg-run-2",
+        summary: "第二次「检查 deskfleet 更新」执行失败：GitHub API 超时，未完成版本核对，需要你重试或打开执行会话排查。",
+        detail: "RUN_2_RAW_ERROR_TRACE_GITHUB_504",
+        error: "GitHub API timeout (504)",
+        evidenceAvailability: "available",
+        createdAt: "2026-11-26T10:00:00Z",
+        updatedAt: "2026-11-26T10:02:00Z",
+      },
+      {
+        id: "run-rec-1",
+        userId: "u1",
+        workspaceId: "ws-1",
+        sourceKind: "schedule",
+        sourceId: "sched-update",
+        runKey: "run:r-1",
+        scheduleId: "sched-update",
+        scheduleTitle: "检查 deskfleet 更新",
+        runId: "r-1",
+        sessionId: "sess-run-1",
+        provider: "antigravity",
+        startedAt: "2026-11-26T09:00:00Z",
+        finishedAt: "2026-11-26T09:02:00Z",
+        status: "completed",
+        deliveryPolicy: "every_run",
+        delivered: true,
+        deliveredMessageId: "msg-run-1",
+        summary: "第一次「检查 deskfleet 更新」结论：最新正式版仍为 v0.23.0，建议暂缓整并 main；未完成合入；需确认是否先合入终端修复。",
+        detail: "RUN_1_FULL_RAW_REPORT_TABLE_CONFLICT_18",
+        evidenceAvailability: "available",
+        createdAt: "2026-11-26T09:00:00Z",
+        updatedAt: "2026-11-26T09:02:00Z",
+      },
+    ],
+    messages: [
+      {
+        id: "msg-linked",
+        role: "assistant",
+        createdAt: "2026-11-26T08:31:00Z",
+        ticketId: "ticket-existing",
+        sessionId: "sess-ticket",
+        text: "登录回归巡检已完成：回调全部通过，暂无需操作。",
+        provenance: {
+          origin: "sa_follow_up",
+          sourceKind: "schedule",
+          sourceId: "sched-login",
+          scheduleId: "sched-login",
+          scheduleTitle: "登录回归巡检",
+          runId: "r-linked",
+          runKey: "run:r-linked",
+          runStatus: "completed",
+          provider: "codex",
+          detail: "LOGIN_LINKED_RAW_DETAIL_200_OK",
+          sessionId: "sess-ticket",
+          evidenceAvailability: "available",
+        },
+      },
+      {
+        id: "msg-run-1",
+        role: "assistant",
+        createdAt: "2026-11-26T09:02:00Z",
+        sessionId: "sess-run-1",
+        text: "第一次「检查 deskfleet 更新」结论：最新正式版仍为 v0.23.0，建议暂缓整并 main；未完成合入；需确认是否先合入终端修复。",
+        provenance: {
+          origin: "sa_follow_up",
+          sourceKind: "schedule",
+          sourceId: "sched-update",
+          scheduleId: "sched-update",
+          scheduleTitle: "检查 deskfleet 更新",
+          runId: "r-1",
+          runKey: "run:r-1",
+          runStatus: "completed",
+          provider: "antigravity",
+          detail: "RUN_1_FULL_RAW_REPORT_TABLE_CONFLICT_18",
+          sessionId: "sess-run-1",
+          evidenceAvailability: "available",
+        },
+      },
+      {
+        id: "msg-run-2",
+        role: "assistant",
+        createdAt: "2026-11-26T10:02:00Z",
+        sessionId: "sess-run-2",
+        text: "第二次「检查 deskfleet 更新」执行失败：GitHub API 超时，未完成版本核对，需要你重试或打开执行会话排查。",
+        provenance: {
+          origin: "sa_follow_up",
+          sourceKind: "schedule",
+          sourceId: "sched-update",
+          scheduleId: "sched-update",
+          scheduleTitle: "检查 deskfleet 更新",
+          runId: "r-2",
+          runKey: "run:r-2",
+          runStatus: "failed",
+          provider: "antigravity",
+          detail: "RUN_2_RAW_ERROR_TRACE_GITHUB_504",
+          sessionId: "sess-run-2",
+          evidenceAvailability: "available",
+        },
+      },
+    ],
+  }
+
+  const superApi: SuperAgentApi = {
+    snapshot: vi.fn(async () => snap),
+    send: vi.fn(async () => snap),
+    correct: vi.fn(async () => snap),
+    settings: vi.fn(async () => snap),
+    followUpAuth: vi.fn(),
+    followUpSources: vi.fn(),
+    followUpUpdateSource: vi.fn(),
+    followUpRuns: vi.fn(async () => ({ runs: [] })),
+  }
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: "/", name: "new-session", component: { template: "<div />" } },
+      { path: "/schedules/:scheduleId?", name: "schedules", component: { template: "<div />" } },
+      { path: "/sessions/:sessionId", name: "session", component: { template: "<div />" } },
+      { path: "/workspaces/:workspaceId/agent", name: "workspace-agent", component: { template: "<div />" } },
+    ],
+  })
+  const wrapper = mount(WorkspaceAgentView, {
+    props: { api: superApi, workspaceId: "ws-1" },
+    attachTo: document.body,
+    global: {
+      plugins: [pinia, router, i18n],
+      provide: { [platformClientKey as symbol]: { ...getClient(), superAgent: superApi } },
+      stubs: {
+        PaneHeader: { template: "<header><slot /><slot name='actions' /></header>" },
+        AgentMarkdown: { props: ["text"], template: "<span>{{ text }}</span>" },
+        SessionComposer: { template: "<div />" },
+        ProjectModelMenu: { template: "<div />" },
+      },
+    },
+  })
+  cleanup.push(() => { wrapper.unmount(); disposePinia(pinia) })
+  await flushPromises()
+
+  // 1. Top bar: NO "主动跟进与运行记录" button/panel; "事项" stays in place with deduplicated count (1 existing ticket + 2 standalone runs = 3, NOT 4!)
+  expect(wrapper.find("[data-follow-up-menu]").exists()).toBe(false)
+  expect(wrapper.get("header").text()).not.toContain("主动跟进与运行记录")
+  const ticketsBtn = wrapper.get("[data-tickets-menu]")
+  expect(ticketsBtn.text()).toBe("事项（3）")
+
+  // 2. Main chat: collapsed shows ONLY SA summary (no raw detail leaked); expanding shows THIS run's details & session link!
+  const msg1 = wrapper.get('[data-super-message="msg-run-1"]')
+  const msg2 = wrapper.get('[data-super-message="msg-run-2"]')
+  expect(msg1.text()).toContain("第一次「检查 deskfleet 更新」结论")
+  expect(msg1.text()).not.toContain("RUN_1_FULL_RAW_REPORT_TABLE_CONFLICT_18")
+  expect(msg1.find("[data-execution-details]").exists()).toBe(false)
+  expect(msg1.get("[data-execution-toggle]").text()).toContain("检查 deskfleet 更新")
+
+  await msg1.get("[data-execution-toggle]").trigger("click")
+  await flushPromises()
+  const details1 = msg1.get("[data-execution-details]")
+  expect(details1.text()).toContain("Antigravity")
+  expect(details1.text()).toContain("已完成")
+  expect(details1.text()).toContain("RUN_1_FULL_RAW_REPORT_TABLE_CONFLICT_18")
+  expect(details1.text()).not.toContain("RUN_2_RAW_ERROR_TRACE_GITHUB_504")
+  expect(details1.get("[data-message-open-session]").attributes("href")).toContain("/sessions/sess-run-1")
+  expect(details1.get("[data-message-open-schedule]").attributes("href")).toContain("/schedules/sched-update")
+
+  // Expanding run 2 shows run 2's OWN failure details and sess-run-2 (zero cross-run conflation!)
+  await msg2.get("[data-execution-toggle]").trigger("click")
+  await flushPromises()
+  const details2 = msg2.get("[data-execution-details]")
+  expect(details2.text()).toContain("执行失败")
+  expect(details2.text()).toContain("RUN_2_RAW_ERROR_TRACE_GITHUB_504")
+  expect(details2.text()).not.toContain("RUN_1_FULL_RAW_REPORT_TABLE_CONFLICT_18")
+  expect(details2.get("[data-message-open-session]").attributes("href")).toContain("/sessions/sess-run-2")
+
+  // 3. Open 事项 popover: linked run is folded inside existing ticket (NO duplicate in standalone runs!),
+  //    and the 2 runs of "检查 deskfleet 更新" appear as 2 distinct items pointing to sess-run-1 and sess-run-2!
+  await ticketsBtn.trigger("click")
+  await flushPromises()
+  const panel = document.body.querySelector('[aria-label="事项"]') as HTMLElement
+  expect(panel).toBeTruthy()
+  const linkedSection = panel.querySelector("[data-ticket-linked-runs]") as HTMLElement
+  expect(linkedSection).toBeTruthy()
+  expect(linkedSection.querySelectorAll('[data-ticket-run="run-rec-linked"]')).toHaveLength(1)
+  const runsSection = panel.querySelector("[data-ticket-runs-section]") as HTMLElement
+  expect(runsSection).toBeTruthy()
+  expect(runsSection.querySelector('[data-ticket-run="run-rec-linked"]')).toBeNull()
+  const run1Item = runsSection.querySelector('[data-ticket-run="run-rec-1"]') as HTMLElement
+  const run2Item = runsSection.querySelector('[data-ticket-run="run-rec-2"]') as HTMLElement
+  expect(run1Item).toBeTruthy()
+  expect(run2Item).toBeTruthy()
+  expect(run1Item.textContent).toContain("RUN_1_FULL_RAW_REPORT_TABLE_CONFLICT_18")
+  expect(run1Item.querySelector("[data-ticket-run-open-session]")?.getAttribute("href")).toContain("/sessions/sess-run-1")
+  expect(run2Item.textContent).toContain("RUN_2_RAW_ERROR_TRACE_GITHUB_504")
+  expect(run2Item.querySelector("[data-ticket-run-open-session]")?.getAttribute("href")).toContain("/sessions/sess-run-2")
 })
