@@ -521,3 +521,28 @@ test("never mis-folds interleaved unrelated turns or manually re-sent adjacent m
   expect(wrapper.find('[data-super-message="w-old"]').exists()).toBe(true)
   expect(wrapper.get('[data-super-message="w-old"]').text()).toContain("旧轮次中途停止的部分记录")
 })
+
+test("on iOS touch, tapping the re-edit banner status hint toggles the tooltip and touch targets meet 44pt sizing", async () => {
+  const initial = makeRoom({
+    messages: [
+      makeMessage("u-stopped", { text: "待重编辑的移动端消息", state: "stopped" }),
+    ],
+  })
+  const { wrapper } = await setup(initial, { ios: true })
+  await wrapper.get('[data-reedit-stopped-turn="u-stopped"]').trigger("click")
+  await flushPromises()
+
+  const trigger = wrapper.get("[data-reedit-status-hint]")
+  expect(trigger.classes()).toContain("min-h-11")
+  expect(new DOMWrapper(document.body).find("[data-reedit-hint-tooltip]").exists()).toBe(false)
+
+  await trigger.trigger("click")
+  await flushPromises()
+  expect(trigger.attributes("aria-expanded")).toBe("true")
+  expect(wrapper.get("[data-reedit-hint-tooltip]").text()).toBe("修改后手动发送，不会恢复旧任务或回滚文件")
+
+  await trigger.trigger("click")
+  await flushPromises()
+  expect(trigger.attributes("aria-expanded")).toBe("false")
+  expect(wrapper.find("[data-reedit-hint-tooltip]").exists()).toBe(false)
+})

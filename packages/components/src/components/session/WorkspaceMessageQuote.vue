@@ -9,6 +9,7 @@ const props = defineProps<{
   text: string
   locatable: boolean
   accentSlot?: number
+  touch?: boolean
 }>()
 const emit = defineEmits<{ locate: [id: string] }>()
 const { t } = useI18n()
@@ -36,6 +37,7 @@ const validAccentSlot = computed(() => isValidAccentSlot(props.accentSlot) ? pro
       type="button"
       data-reply-quote-target
       :aria-label="t('superAgent.locateQuotedMessage', { text })"
+      :class="touch && 'min-h-11 py-2'"
       class="flex min-w-0 max-w-full cursor-pointer items-center pl-2 text-left ui-motion hover:text-ui-text"
       @click="emit('locate', replyTo)"
     >

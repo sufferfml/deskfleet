@@ -332,6 +332,7 @@
     "quote": "引用",
     "clearQuote": "引用を外す",
     "locateQuotedMessage": "引用元のメッセージへ移動: {text}",
+    "locatePreviousUserMessage": "前のメッセージへ移動",
     "quotedMessageUnavailable": "元のメッセージは利用できません",
     "correct": "チケットを変更",
     "linkToTicket": "チケットに関連付け…",
@@ -1777,7 +1778,8 @@
     "hide": "ワークスペースを非表示",
     "unhide": "非表示を解除",
     "hiddenBadge": "非表示",
-    "hiddenSection": "非表示のワークスペース"
+    "hiddenSection": "非表示のワークスペース",
+    "actions": "ワークスペースの操作"
   },
   "applications": {
     "openWith": "アプリで開く",

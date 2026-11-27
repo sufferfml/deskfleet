@@ -332,6 +332,7 @@
     "quote": "引用",
     "clearQuote": "取消引用",
     "locateQuotedMessage": "定位到引用的原消息：{text}",
+    "locatePreviousUserMessage": "跳转到上一条消息",
     "quotedMessageUnavailable": "原消息不可用",
     "correct": "修改归属",
     "linkToTicket": "关联到事项…",
@@ -1777,7 +1778,8 @@
     "hide": "隐藏工作区",
     "unhide": "取消隐藏",
     "hiddenBadge": "已隐藏",
-    "hiddenSection": "已隐藏工作区"
+    "hiddenSection": "已隐藏工作区",
+    "actions": "工作区操作"
   },
   "applications": {
     "openWith": "打开方式",

@@ -332,6 +332,7 @@
     "quote": "Quote",
     "clearQuote": "Remove quote",
     "locateQuotedMessage": "Locate quoted message: {text}",
+    "locatePreviousUserMessage": "Jump to previous message",
     "quotedMessageUnavailable": "Original message unavailable",
     "correct": "Change ticket",
     "linkToTicket": "Link to ticket…",
@@ -1777,7 +1778,8 @@
     "hide": "Hide workspace",
     "unhide": "Unhide workspace",
     "hiddenBadge": "Hidden",
-    "hiddenSection": "Hidden workspaces"
+    "hiddenSection": "Hidden workspaces",
+    "actions": "Workspace actions"
   },
   "applications": {
     "openWith": "Open with",

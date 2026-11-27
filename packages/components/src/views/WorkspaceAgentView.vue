@@ -1138,7 +1138,7 @@ function feedbackGroupAccentSlot(row: WorkspaceRow): number | undefined {
 
 <template>
   <PaneHeader>
-    <span class="inline-flex items-center gap-2"><Folder v-if="workspaceId" :size="15" aria-hidden="true" /><MessagesSquare v-else :size="15" aria-hidden="true" />{{ name }}</span>
+    <span class="inline-flex min-w-0 max-w-full items-center gap-2"><Folder v-if="workspaceId" :size="15" class="shrink-0" aria-hidden="true" /><MessagesSquare v-else :size="15" class="shrink-0" aria-hidden="true" /><span class="truncate">{{ name }}</span></span>
     <template #actions>
       <PopoverRoot v-if="workspaceId && project?.workspace.githubRepositories?.length" v-model:open="githubOpen">
         <PopoverTrigger type="button" :aria-label="t('githubSettings.title')" :title="t('githubSettings.title')" :class="touchWorkspace && 'min-h-11 min-w-11'" class="app-no-drag ui-button-ghost h-7 px-2 data-[state=open]:bg-ui-hover">
@@ -1187,7 +1187,7 @@ function feedbackGroupAccentSlot(row: WorkspaceRow): number | undefined {
                         <p v-if="run.detail && run.detail.trim() !== run.summary.trim()" data-ticket-run-detail class="my-1 select-text whitespace-pre-wrap text-[11px] text-ui-text-muted">{{ run.detail }}</p>
                         <p v-else-if="run.error && !run.summary.includes(run.error)" class="my-1 select-text whitespace-pre-wrap text-[11px] text-ui-danger">{{ run.error }}</p>
                         <p v-if="run.evidenceAvailability !== 'available'" class="my-0.5 text-[11px] text-ui-text-faint">{{ evidenceAvailabilityLabel(run.evidenceAvailability) }}</p>
-                        <div class="mt-1 flex flex-wrap items-center gap-x-3 text-xs text-ui-accent">
+                        <div class="mt-1 flex flex-wrap items-center gap-x-3 text-xs text-ui-accent" :class="touchWorkspace && 'workspace-touch-actions'">
                           <RouterLink v-if="run.sessionId && run.evidenceAvailability !== 'deleted'" :to="sessionRoute(run.sessionId)" data-ticket-run-open-session class="inline-flex items-center no-underline hover:underline">{{ t("superAgent.openSession") }}</RouterLink>
                           <RouterLink v-if="run.scheduleId" :to="scheduleRoute(run.scheduleId)" data-ticket-run-open-schedule class="inline-flex items-center no-underline hover:underline">{{ t("superAgent.followUp.openSchedule") }}</RouterLink>
                           <button v-if="run.deliveredMessageId && byId.has(run.deliveredMessageId)" type="button" data-ticket-run-locate class="text-ui-accent" @click="locateMessage(run.deliveredMessageId)">{{ t("superAgent.followUp.locateRunMessage", { name: run.scheduleTitle ?? run.sourceId }) }}</button>
@@ -1354,8 +1354,8 @@ function feedbackGroupAccentSlot(row: WorkspaceRow): number | undefined {
           <template v-for="row in (!group.approvals || expandedApprovals.has(group.id) ? group.rows : [])" :key="row.message.id">
             <li :data-super-message="row.message.id" :data-folded-history-member="entry.kind === 'foldedStoppedTurn' ? entry.id : undefined" :data-conversation-located="locatedMessage === row.message.id || undefined" :data-outline-source="sourceForOutline(row.message)" :data-conversation-entry="row.message.role === 'user' ? row.message.id : undefined" class="min-w-0 scroll-mt-6"
               :class="[{ 'workspace-touch-actions': touchWorkspace, 'ui-conversation-history': !row.progress && row.message.id !== displayedRows.at(-1)?.message.id && details !== row.message.id && activeEntry !== row.message.id && locatedMessage !== row.message.id, 'ui-conversation-input': row.message.role === 'user' }, entry.kind === 'foldedStoppedTurn' && 'border-l-2 border-ui-border/70 pl-3 opacity-90']">
-              <WorkspaceMessage :assistant-name="assistantDisplayName" :accent-tickets="row.linkedTickets" :resource-target="row.message.role === 'worker' ? resourceTarget : undefined" :read-attachment="readAttachment" :message="row.message" :touch="touchWorkspace" :animate-send="row.message.id === lastUserMessage" :can-fork="!!row.fork && supportsFork(row.fork.sessionId)" :fork-disabled="!!offlineMachine"
-                @quote="quote(row.message)" @fork="row.fork && openFork(row.fork.sessionId, row.fork.turnId)" @avatar-dblclick="locatePreviousUserMessage(row.message.id)">
+              <WorkspaceMessage :assistant-name="assistantDisplayName" :accent-tickets="row.linkedTickets" :resource-target="row.message.role === 'worker' ? resourceTarget : undefined" :read-attachment="readAttachment" :message="row.message" :touch="touchWorkspace" :animate-send="row.message.id === lastUserMessage" :can-fork="!!row.fork && supportsFork(row.fork.sessionId)" :fork-disabled="!!offlineMachine" :can-locate-previous="touchWorkspace && row.message.role === 'user' && !!previousUserMessageId(displayedRows, row.message.id)"
+                @quote="quote(row.message)" @fork="row.fork && openFork(row.fork.sessionId, row.fork.turnId)" @avatar-dblclick="locatePreviousUserMessage(row.message.id)" @locate-previous="locatePreviousUserMessage(row.message.id)">
                 <template #heading>
                   <button
                     v-if="row.linkedTickets.length || runInfoByMessageId.get(row.message.id) || row.jobs.length || visibleSessionsFor(row.sessions, runInfoByMessageId.get(row.message.id)).length || canAttributeMessage(row.message)"
@@ -1512,6 +1512,7 @@ function feedbackGroupAccentSlot(row: WorkspaceRow): number | undefined {
                     :text="replyQuote(row.message.replyTo)!.text"
                     :locatable="replyQuote(row.message.replyTo)!.locatable"
                     :accent-slot="replyQuote(row.message.replyTo)!.accentSlot"
+                    :touch="touchWorkspace"
                     @locate="locateMessage"
                   />
                 </template>
@@ -1754,7 +1755,7 @@ function feedbackGroupAccentSlot(row: WorkspaceRow): number | undefined {
         :class="quotedAccentSlot !== undefined ? 'sa-ticket-accent sa-ticket-rail' : 'border-ui-accent'"
       >
         <span class="min-w-0 flex-1 truncate">{{ quoteText(quoted) }}</span>
-        <button type="button" :aria-label="t('superAgent.clearQuote')" @click="delete draft.replyTo"><X :size="14" aria-hidden="true" /></button>
+        <button type="button" :aria-label="t('superAgent.clearQuote')" :class="touchWorkspace && 'inline-flex min-h-11 min-w-11 items-center justify-center -my-2 -mr-2'" @click="delete draft.replyTo"><X :size="14" aria-hidden="true" /></button>
       </div>
     </template>
     <template #toolbar>

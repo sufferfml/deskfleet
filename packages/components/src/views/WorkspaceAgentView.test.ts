@@ -2029,4 +2029,28 @@ test.each([false, true])("clickable long quote preserves start-aligned single-li
   await button.trigger("click")
   await flushPromises()
   expect(scroll.mock.contexts[0]).toBe(wrapper.get('[data-super-message="long-orig"]').element)
+  if (ios) expect(button.classes()).toContain("min-h-11")
+})
+
+test("mobile touch user messages expose a one-tap previous-message button without altering desktop actions", async () => {
+  const snapshot = room({
+    messages: [
+      message("u1", { text: "First question" }),
+      message("u2", { text: "Second question" }),
+    ],
+  })
+
+  await setup(snapshot, "team", false)
+  expect(wrapper.find("[data-locate-previous-user]").exists()).toBe(false)
+  wrapper.unmount()
+
+  await setup(snapshot, "team", true)
+  expect(wrapper.get('[data-super-message="u1"]').find("[data-locate-previous-user]").exists()).toBe(false)
+  const jumpButton = wrapper.get('[data-super-message="u2"] [data-locate-previous-user]')
+  const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
+  await jumpButton.trigger("click")
+  await flushPromises()
+  expect(scroll).toHaveBeenCalledTimes(1)
+  expect(scroll.mock.contexts[0]).toBe(wrapper.get('[data-super-message="u1"]').element)
+  expect(wrapper.get("[data-conversation-located]").element).toBe(wrapper.get('[data-super-message="u1"]').element)
 })

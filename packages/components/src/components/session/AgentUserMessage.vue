@@ -13,8 +13,8 @@ import AgentActor from "./AgentActor.vue"
 import AgentContent from "./AgentContent.vue"
 import AgentMessageActions from "./AgentMessageActions.vue"
 type DisplayInput = Pick<ConversationInput, "author" | "content" | "state" | "createdAt" | "deliveredAt" | "actualDelivery" | "dispatcher"> & { id?: string }
-const props = defineProps<{ input: DisplayInput; copyContent?: ConversationInput["content"]; disclosureId?: string; animateSend?: boolean; unattributedLabel?: string; canQuote?: boolean; alwaysShowActions?: boolean }>()
-const emit = defineEmits<{ quote: []; avatarDblclick: [] }>()
+const props = defineProps<{ input: DisplayInput; copyContent?: ConversationInput["content"]; disclosureId?: string; animateSend?: boolean; unattributedLabel?: string; canQuote?: boolean; canLocatePrevious?: boolean; alwaysShowActions?: boolean }>()
+const emit = defineEmits<{ quote: []; avatarDblclick: []; locatePrevious: [] }>()
 const { t, locale } = useI18n()
 const { name, email } = useAgentActor(() => props.input.author)
 const time = computed(() => formatMessageTime(props.input.deliveredAt ?? props.input.createdAt, intlLocale(locale.value as AppLocale)))
@@ -54,7 +54,7 @@ onScopeDispose(() => { for (const anim of animations) anim.cancel() })
       </div>
       <p v-if="input.state === 'uncertain'" class="m-0 max-w-md text-right text-xs text-ui-warning">{{ t('agent.uncertainInput') }}</p>
       <slot name="after" />
-      <AgentMessageActions :text="text" :can-quote="canQuote" :always-visible="alwaysShowActions" @quote="emit('quote')" />
+      <AgentMessageActions :text="text" :can-quote="canQuote" :can-locate-previous="canLocatePrevious" :always-visible="alwaysShowActions" @quote="emit('quote')" @locate-previous="emit('locatePrevious')" />
     </div>
     <UserAvatar v-if="input.author.userId" data-user-message-avatar :name="name" :email="email" :size="32" :title="name" class="mt-6 select-none text-xs" @dblclick="emit('avatarDblclick')" />
     <span v-else data-user-message-avatar class="ui-avatar mt-6 h-8 w-8 select-none rounded-full" :title="unattributedLabel || name" aria-hidden="true" @dblclick="emit('avatarDblclick')">

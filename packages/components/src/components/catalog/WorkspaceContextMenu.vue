@@ -9,6 +9,7 @@ import { useRoute, useRouter } from "vue-router"
 import type { CatalogDirectory } from "@deskfleet/client/catalog"
 import { useAccountSession } from "../../composables/useAccountSession.ts"
 import { useHiddenWorkspaces } from "../../composables/useHiddenWorkspaces.ts"
+import { usePlatformClient } from "../../composables/usePlatformClient.ts"
 import { useFleetStore } from "../../stores/fleet.ts"
 import UiButton from "../common/UiButton.vue"
 import UiDialog from "../common/UiDialog.vue"
@@ -16,9 +17,11 @@ import WorkspaceEditDialog from "./WorkspaceEditDialog.vue"
 
 const props = defineProps<{ workspaceId: string; machineId: string; name: string; directories: CatalogDirectory[]; disabled?: boolean }>()
 const { t } = useI18n()
+const client = usePlatformClient()
 const fleet = useFleetStore()
 const account = useAccountSession()
 const hiddenWorkspaces = useHiddenWorkspaces()
+const mobile = computed(() => !!client.mobile)
 const hidden = computed(() => hiddenWorkspaces.isHidden(props.machineId, props.workspaceId))
 const route = useRoute()
 const router = useRouter()
@@ -79,6 +82,17 @@ function openMenu(event: Event): void {
   cursor.value = event instanceof MouseEvent ? { x: event.clientX, y: event.clientY } : undefined
   open.value = true
 }
+function openActions(event?: Event): void {
+  event?.stopPropagation()
+  const target = event?.currentTarget instanceof HTMLElement ? event.currentTarget : undefined
+  if (target) {
+    const rect = target.getBoundingClientRect()
+    cursor.value = rect.width > 0 || rect.height > 0 ? { x: rect.right, y: rect.bottom } : undefined
+  } else {
+    cursor.value = undefined
+  }
+  open.value = true
+}
 function keyboardOpen(event: KeyboardEvent): void {
   if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return
   openMenu(event)
@@ -104,21 +118,21 @@ function confirm(): void {
   if (!pending.value && !props.disabled) void remove()
 }
 
-defineExpose({ cursor, pointerReference })
+defineExpose({ cursor, pointerReference, openActions })
 </script>
 
 <template>
   <ContextMenuRoot v-model:open="open" :modal="false">
     <ContextMenuTrigger as="div" @contextmenu="openMenu" @keydown="keyboardOpen">
       <div ref="row">
-        <slot />
+        <slot :open-actions="openActions" />
       </div>
     </ContextMenuTrigger>
     <ContextMenuPortal>
       <ContextMenuContent :as="SpringSurface" :reference="pointerReference" :aria-label="name" :collision-padding="8" class="ui-menu z-50 flex w-48 flex-col" loop @close-auto-focus="closeFocus" @interact-outside="dialog && $event.preventDefault()">
-        <ContextMenuItem as="button" type="button" class="ui-menu-item" :disabled="disabled" @select="choose('edit')"><Pencil :size="14" aria-hidden="true" />{{ t('workspace.edit') }}</ContextMenuItem>
-        <ContextMenuItem as="button" type="button" class="ui-menu-item" :data-workspace-action="hidden ? 'unhide' : 'hide'" @select="toggleHidden"><component :is="hidden ? Eye : EyeOff" :size="14" aria-hidden="true" />{{ t(hidden ? 'workspace.unhide' : 'workspace.hide') }}</ContextMenuItem>
-        <ContextMenuItem as="button" type="button" class="ui-menu-item text-ui-danger" :disabled="disabled" @select="choose('delete')"><Trash2 :size="14" aria-hidden="true" />{{ t('workspace.delete') }}</ContextMenuItem>
+        <ContextMenuItem as="button" type="button" class="ui-menu-item" :class="mobile && 'min-h-11'" :disabled="disabled" @select="choose('edit')"><Pencil :size="14" aria-hidden="true" />{{ t('workspace.edit') }}</ContextMenuItem>
+        <ContextMenuItem as="button" type="button" class="ui-menu-item" :class="mobile && 'min-h-11'" :data-workspace-action="hidden ? 'unhide' : 'hide'" @select="toggleHidden"><component :is="hidden ? Eye : EyeOff" :size="14" aria-hidden="true" />{{ t(hidden ? 'workspace.unhide' : 'workspace.hide') }}</ContextMenuItem>
+        <ContextMenuItem as="button" type="button" class="ui-menu-item text-ui-danger" :class="mobile && 'min-h-11'" :disabled="disabled" @select="choose('delete')"><Trash2 :size="14" aria-hidden="true" />{{ t('workspace.delete') }}</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenuPortal>
   </ContextMenuRoot>

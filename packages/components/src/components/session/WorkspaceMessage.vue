@@ -13,8 +13,8 @@ import WorkspaceMessageAttachment from "./WorkspaceMessageAttachment.vue"
 import AgentMessageActions from "./AgentMessageActions.vue"
 import AgentUserMessage from "./AgentUserMessage.vue"
 
-const props = defineProps<{ message: SuperMessage; assistantName?: string; accentTickets?: readonly SuperTicket[]; resourceTarget?: FileTarget; readAttachment?: (id: string, index: number) => Promise<SuperAttachmentPreview>; animateSend: boolean; touch: boolean; canFork: boolean; forkDisabled: boolean }>()
-const emit = defineEmits<{ quote: []; fork: []; avatarDblclick: [] }>()
+const props = defineProps<{ message: SuperMessage; assistantName?: string; accentTickets?: readonly SuperTicket[]; resourceTarget?: FileTarget; readAttachment?: (id: string, index: number) => Promise<SuperAttachmentPreview>; animateSend: boolean; touch: boolean; canFork: boolean; forkDisabled: boolean; canLocatePrevious?: boolean }>()
+const emit = defineEmits<{ quote: []; fork: []; avatarDblclick: []; locatePrevious: [] }>()
 const { t } = useI18n()
 const fallbackAssistantName = props.assistantName === undefined
   ? useWorkspaceAgentDisplayName(() => t("superAgent.role.assistant")).displayName
@@ -67,7 +67,7 @@ const singleAccentSlot = computed(() => {
 </script>
 
 <template>
-  <AgentUserMessage v-if="message.role === 'user'" :input="input" :copy-content="copyContent" :animate-send="animateSend" can-quote :always-show-actions="touch" @quote="emit('quote')" @avatar-dblclick="emit('avatarDblclick')">
+  <AgentUserMessage v-if="message.role === 'user'" :input="input" :copy-content="copyContent" :animate-send="animateSend" can-quote :can-locate-previous="canLocatePrevious" :always-show-actions="touch" @quote="emit('quote')" @avatar-dblclick="emit('avatarDblclick')" @locate-previous="emit('locatePrevious')">
     <template #heading><slot name="heading" /></template>
     <template #before><slot name="before" /></template>
     <template #attachments>

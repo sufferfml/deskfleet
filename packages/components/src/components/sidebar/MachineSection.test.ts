@@ -970,3 +970,70 @@ test("workspace-less sessions fold inside the Chat folder, bubble working state,
   expect(folder.attributes("aria-expanded")).toBe("false")
   wrapper.unmount()
 })
+
+test.each([false, true])("mobile touch buttons hide/unhide workspaces and toggle hidden workspaces without right-click (projectHome=%s)", async projectHome => {
+  useWorkspaceAgentMode().value = projectHome
+  const pinia = createPinia()
+  setActivePinia(pinia)
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: "/", name: "new-session", component: {} },
+      { path: "/machines/:machineId/control", name: "machine-control", component: {} },
+      { path: "/workspaces/:workspaceId", name: "workspace", component: {} },
+      { path: "/sessions/:sessionId", name: "session", component: {} },
+      { path: "/workspaces/:workspaceId/agent", name: "workspace-agent", component: {} },
+      { path: "/projects/new", name: "new-project", component: {} },
+      { path: "/terminals/:terminalId", name: "terminal", component: {} },
+    ],
+  })
+  await router.push("/")
+  const mobileClient = {
+    ...getClient(),
+    platform: "web" as const,
+    mobile: true,
+    remoteWorkspaceAgent: projectHome,
+  }
+  const wrapper = mount(MachineSection, {
+    attachTo: document.body,
+    props: { machine: {
+      id: "remote-mac", name: "Mac mini", local: false, online: true, desktop: false, terminals: [], sessions: [],
+      workspaces: [
+        { id: "ws-1", name: "Alpha", directories: [{ path: "/code/alpha" }], terminals: [], sessions: [] },
+        { id: "ws-2", name: "Beta", directories: [{ path: "/code/beta" }], terminals: [], sessions: [] },
+      ],
+    } },
+    global: { plugins: [pinia, router, i18n], provide: { [platformClientKey as symbol]: mobileClient } },
+  })
+  const page = () => new DOMWrapper(document.body)
+  const rowSelector = projectHome ? "[data-project-workspace]" : "[data-workspace-id]"
+  const rowAttr = projectHome ? "data-project-workspace" : "data-workspace-id"
+
+  expect(wrapper.find("[data-machine-toggle-hidden]").exists()).toBe(false)
+  const alphaRow = wrapper.get(`[${rowAttr}="ws-1"]`)
+  await alphaRow.get("[data-workspace-menu-trigger]").trigger("click")
+  await flushPromises()
+  const hideItem = page().get('[data-workspace-action="hide"]')
+  expect(hideItem.classes()).toContain("min-h-11")
+  await hideItem.trigger("click")
+  await flushPromises()
+
+  expect(wrapper.findAll(rowSelector).map(row => row.attributes(rowAttr))).toEqual(["ws-2"])
+  const revealButton = wrapper.get("[data-machine-toggle-hidden]")
+  expect(revealButton.attributes("aria-pressed")).toBe("false")
+  await revealButton.trigger("click")
+  await flushPromises()
+
+  expect(wrapper.get("[data-machine-toggle-hidden]").attributes("aria-pressed")).toBe("true")
+  const revealedAlpha = wrapper.get(`[${rowAttr}="ws-1"]`)
+  expect(revealedAlpha.attributes("data-workspace-hidden")).toBe("true")
+
+  await revealedAlpha.get("[data-workspace-menu-trigger]").trigger("click")
+  await flushPromises()
+  await page().get('[data-workspace-action="unhide"]').trigger("click")
+  await flushPromises()
+
+  expect(wrapper.findAll(`${rowSelector}:not([data-workspace-hidden])`).map(row => row.attributes(rowAttr))).toEqual(["ws-1", "ws-2"])
+  expect(wrapper.find("[data-machine-toggle-hidden]").exists()).toBe(false)
+  wrapper.unmount()
+})

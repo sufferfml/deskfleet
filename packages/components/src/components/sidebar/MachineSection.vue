@@ -3,6 +3,8 @@ import {
   Archive,
   Bot,
   ChevronRight,
+  EllipsisVertical,
+  Eye,
   EyeOff,
   Folder,
   FolderOpen,
@@ -423,6 +425,17 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
           <ChevronRight v-if="projectHome && collapsed" :size="14" class="shrink-0" aria-hidden="true" />
         </CollapsibleTrigger>
         <template v-if="projectHome">
+          <UiButton
+            v-if="client.mobile && (showingHidden || hasHiddenWorkspaces)"
+            data-machine-toggle-hidden
+            variant="ghost"
+            size="icon"
+            :label="t(showingHidden ? 'machine.hideHiddenWorkspaces' : 'machine.showHiddenWorkspaces')"
+            :aria-pressed="showingHidden"
+            @click="toggleHiddenWorkspaces"
+          >
+            <component :is="showingHidden ? EyeOff : Eye" :size="15" :stroke-width="1.75" aria-hidden="true" />
+          </UiButton>
           <UiButton data-new-project variant="ghost" size="icon" :title="t('superAgent.newProject')" :aria-label="t('superAgent.newProject')" :disabled="!machine.online" @click="openRoute(newProject)">
             <Plus :size="16" :stroke-width="1.75" aria-hidden="true" />
           </UiButton>
@@ -430,6 +443,18 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
             :icon="machine.local ? SquareTerminal : MonitorPlay" :label="t(machine.local ? 'machine.localControl' : 'machine.remoteControl')" :depth="0" compact />
         </template>
         <div v-else class="flex shrink-0 items-center gap-0.5">
+          <UiButton
+            v-if="client.mobile && (showingHidden || hasHiddenWorkspaces)"
+            data-machine-toggle-hidden
+            variant="ghost"
+            size="icon"
+            class="!h-6 !w-6 rounded-md text-ui-text-faint [&:not(:disabled,[aria-disabled=true])]:hover:bg-ui-text/8 [&:not(:disabled,[aria-disabled=true])]:hover:text-ui-text"
+            :label="t(showingHidden ? 'machine.hideHiddenWorkspaces' : 'machine.showHiddenWorkspaces')"
+            :aria-pressed="showingHidden"
+            @click="toggleHiddenWorkspaces"
+          >
+            <component :is="showingHidden ? EyeOff : Eye" :size="14" :stroke-width="1.75" aria-hidden="true" />
+          </UiButton>
           <div
             v-if="machine.online"
             class="flex shrink-0 items-center text-ui-text-faint ui-motion can-hover:max-w-0 can-hover:overflow-hidden can-hover:op-0 can-hover:pointer-events-none group-hover:max-w-8 group-hover:op-100 group-hover:pointer-events-auto group-has-[:focus-visible]:max-w-8 group-has-[:focus-visible]:op-100 group-has-[:focus-visible]:pointer-events-auto"
@@ -488,7 +513,7 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
           </CollapsibleContent>
         </CollapsibleRoot>
         <CollapsibleRoot v-for="workspace in workspaces" :key="workspace.id" :open="isProjectOpen(workspace.id)" as="li" :data-project-workspace="workspace.id" class="flex flex-col gap-1" @update:open="value => setProjectOpen(workspace.id, value)">
-          <WorkspaceContextMenu :workspace-id="workspace.id" :machine-id="machine.id" :name="workspace.name" :directories="workspace.directories" :disabled="!machine.online || !fleet.canManageCatalog">
+          <WorkspaceContextMenu v-slot="{ openActions }" :workspace-id="workspace.id" :machine-id="machine.id" :name="workspace.name" :directories="workspace.directories" :disabled="!machine.online || !fleet.canManageCatalog">
             <div class="workspace-row ui-nav-item relative" :class="route.name === 'workspace-agent' && route.params.workspaceId === workspace.id && (!account || account.machineId.value === machine.id) && 'ui-nav-active'">
               <button type="button" data-open-project :title="workspace.directories[0]?.path" class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2.5 pl-2.5 text-left" @click="openWorkspace(workspace.id)">
                 <Bot :size="15" class="shrink-0" aria-hidden="true" />
@@ -499,6 +524,7 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
               </button>
               <div class="workspace-actions flex shrink-0 items-center pr-1">
                 <UiButton variant="ghost" size="icon" :label="t('workspace.openDefaultTerminal')" class="text-inherit enabled:hover:bg-transparent enabled:hover:text-inherit" :disabled="!machine.online || openingTerminal || workspace.directories.length === 0" @click="openTerminal(workspace)"><SquareTerminal :size="16" :stroke-width="1.75" aria-hidden="true" /></UiButton>
+                <UiButton v-if="client.mobile" data-workspace-menu-trigger variant="ghost" size="icon" :label="t('workspace.actions')" class="text-inherit enabled:hover:bg-transparent enabled:hover:text-inherit" @click.stop="openActions($event)"><EllipsisVertical :size="16" :stroke-width="1.75" aria-hidden="true" /></UiButton>
               </div>
               <CollapsibleTrigger type="button" :aria-label="t('superAgent.toggleSessions', { name: repeatedNames.has(workspace.name) ? `${workspace.name} #${workspace.id}` : workspace.name })" class="mr-1 grid h-7 w-7 shrink-0 cursor-pointer place-items-center rounded hover:bg-ui-hover">
                 <ChevronRight :size="15" :class="isProjectOpen(workspace.id) && 'rotate-90'" aria-hidden="true" />
@@ -531,7 +557,7 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
           <span>{{ t("workspace.hiddenSection") }}</span>
         </li>
         <CollapsibleRoot v-for="workspace in revealedHiddenWorkspaces" :key="workspace.id" :open="isProjectOpen(workspace.id)" as="li" :data-project-workspace="workspace.id" data-workspace-hidden="true" class="flex flex-col gap-1" @update:open="value => setProjectOpen(workspace.id, value)">
-          <WorkspaceContextMenu :workspace-id="workspace.id" :machine-id="machine.id" :name="workspace.name" :directories="workspace.directories" :disabled="!machine.online || !fleet.canManageCatalog">
+          <WorkspaceContextMenu v-slot="{ openActions }" :workspace-id="workspace.id" :machine-id="machine.id" :name="workspace.name" :directories="workspace.directories" :disabled="!machine.online || !fleet.canManageCatalog">
             <div class="workspace-row ui-nav-item relative border border-dashed border-ui-border-strong/70 opacity-75 hover:opacity-100" :class="route.name === 'workspace-agent' && route.params.workspaceId === workspace.id && (!account || account.machineId.value === machine.id) && 'ui-nav-active opacity-100'">
               <button type="button" data-open-project :title="workspace.directories[0]?.path" class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2.5 pl-2.5 text-left text-ui-text-muted" @click="openWorkspace(workspace.id)">
                 <EyeOff :size="15" class="shrink-0 text-ui-text-faint" aria-hidden="true" />
@@ -543,6 +569,7 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
               </button>
               <div class="workspace-actions flex shrink-0 items-center pr-1">
                 <UiButton variant="ghost" size="icon" :label="t('workspace.openDefaultTerminal')" class="text-inherit enabled:hover:bg-transparent enabled:hover:text-inherit" :disabled="!machine.online || openingTerminal || workspace.directories.length === 0" @click="openTerminal(workspace)"><SquareTerminal :size="16" :stroke-width="1.75" aria-hidden="true" /></UiButton>
+                <UiButton v-if="client.mobile" data-workspace-menu-trigger variant="ghost" size="icon" :label="t('workspace.actions')" class="text-inherit enabled:hover:bg-transparent enabled:hover:text-inherit" @click.stop="openActions($event)"><EllipsisVertical :size="16" :stroke-width="1.75" aria-hidden="true" /></UiButton>
               </div>
               <CollapsibleTrigger type="button" :aria-label="t('superAgent.toggleSessions', { name: repeatedNames.has(workspace.name) ? `${workspace.name} #${workspace.id}` : workspace.name })" class="mr-1 grid h-7 w-7 shrink-0 cursor-pointer place-items-center rounded hover:bg-ui-hover">
                 <ChevronRight :size="15" :class="isProjectOpen(workspace.id) && 'rotate-90'" aria-hidden="true" />
@@ -670,7 +697,7 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
         {{ t("machine.noWorkspaces") }}
       </li>
       <CollapsibleRoot v-for="workspace in workspaces" :key="workspace.id" v-slot="{ open }" as="li" :data-workspace-id="workspace.id" default-open class="flex flex-col gap-1">
-        <WorkspaceContextMenu :workspace-id="workspace.id" :machine-id="machine.id" :name="workspace.name" :directories="workspace.directories" :disabled="!machine.online || !fleet.canManageCatalog">
+        <WorkspaceContextMenu v-slot="{ openActions }" :workspace-id="workspace.id" :machine-id="machine.id" :name="workspace.name" :directories="workspace.directories" :disabled="!machine.online || !fleet.canManageCatalog">
           <SidebarReorderRow
             v-slot="{ source }"
             :group="workspaceGroup"
@@ -711,6 +738,17 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
                   @click="startSession(workspace.id)"
                 >
                   <SquarePen :size="14" :stroke-width="1.75" aria-hidden="true" />
+                </UiButton>
+                <UiButton
+                  v-if="client.mobile"
+                  data-workspace-menu-trigger
+                  variant="ghost"
+                  size="icon"
+                  :label="t('workspace.actions')"
+                  class="!h-6 !w-6 rounded-md text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-ui-text/8 [&:not(:disabled,[aria-disabled=true])]:hover:text-ui-text"
+                  @click.stop="openActions($event)"
+                >
+                  <EllipsisVertical :size="14" :stroke-width="1.75" aria-hidden="true" />
                 </UiButton>
               </div>
               <CollapsibleTrigger
@@ -769,7 +807,7 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
         <span>{{ t("workspace.hiddenSection") }}</span>
       </li>
       <CollapsibleRoot v-for="workspace in revealedHiddenWorkspaces" :key="workspace.id" v-slot="{ open }" as="li" :data-workspace-id="workspace.id" data-workspace-hidden="true" :default-open="false" class="flex flex-col gap-1">
-        <WorkspaceContextMenu :workspace-id="workspace.id" :machine-id="machine.id" :name="workspace.name" :directories="workspace.directories" :disabled="!machine.online || !fleet.canManageCatalog">
+        <WorkspaceContextMenu v-slot="{ openActions }" :workspace-id="workspace.id" :machine-id="machine.id" :name="workspace.name" :directories="workspace.directories" :disabled="!machine.online || !fleet.canManageCatalog">
           <div class="workspace-row group/ws flex h-8 items-center rounded-lg border border-dashed border-ui-border-strong/70 pl-4 pr-1 opacity-75 ui-motion hover:bg-ui-hover hover:opacity-100">
             <CollapsibleTrigger
               type="button"
@@ -804,6 +842,17 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
                   @click="startSession(workspace.id)"
                 >
                   <SquarePen :size="14" :stroke-width="1.75" aria-hidden="true" />
+                </UiButton>
+                <UiButton
+                  v-if="client.mobile"
+                  data-workspace-menu-trigger
+                  variant="ghost"
+                  size="icon"
+                  :label="t('workspace.actions')"
+                  class="!h-6 !w-6 rounded-md text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-ui-text/8 [&:not(:disabled,[aria-disabled=true])]:hover:text-ui-text"
+                  @click.stop="openActions($event)"
+                >
+                  <EllipsisVertical :size="14" :stroke-width="1.75" aria-hidden="true" />
                 </UiButton>
               </div>
               <CollapsibleTrigger
