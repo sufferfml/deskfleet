@@ -2,7 +2,8 @@
 import { useI18n } from "vue-i18n"
 import { computed } from "vue"
 import { Square } from "@lucide/vue"
-import type { SuperTicket } from "@deskfleet/protocol/super-agent"
+import { isValidAccentSlot, type SuperTicket } from "@deskfleet/protocol/super-agent"
+import "../../styles/sa-ticket-accents.css"
 import type { WorkspaceRequestFeedback } from "../../services/workspace-feedback.ts"
 import { stoppableSteps, type WorkspaceReplyProgress } from "../../services/workspace-message-timeline.ts"
 import WorkspaceProgressDetails from "./WorkspaceProgressDetails.vue"
@@ -14,6 +15,7 @@ const props = defineProps<{
   unreachable?: boolean
   feedback?: WorkspaceRequestFeedback
   tickets?: Map<string, SuperTicket>
+  fallbackTickets?: readonly SuperTicket[]
   touch?: boolean
   onLoadProcess?: (sourceMessageId: string, append?: boolean) => void
 }>()
@@ -23,11 +25,31 @@ const targets = computed(() => props.supportsStop ? stoppableSteps(props.progres
 const split = computed(() => targets.value.length > 1)
 const label = computed(() => split.value ? t(targets.value.some(step => step.sharedTurn) ? "superAgent.stop.groupShared" : "superAgent.stop.group", { count: targets.value.length })
   : t(targets.value[0]?.sharedTurn ? "superAgent.stop.turn" : "superAgent.stop.request"))
+const progressAccentSlot = computed(() => {
+  const ids = new Set<string>()
+  for (const step of props.progress.steps) {
+    if (step.ticketId) ids.add(step.ticketId)
+  }
+  if (ids.size === 0 && props.fallbackTickets?.length === 1) {
+    const fallback = props.fallbackTickets[0]!
+    const slot = props.tickets?.get(fallback.id)?.accentSlot ?? fallback.accentSlot
+    return isValidAccentSlot(slot) ? slot : undefined
+  }
+  if (ids.size !== 1) return undefined
+  const [ticketId] = ids
+  const slot = props.tickets?.get(ticketId!)?.accentSlot
+  return isValidAccentSlot(slot) ? slot : undefined
+})
 </script>
 
 <template>
-  <div :data-agent-progress-for="progress.sourceId"
-    class="my-1 border-l-2 border-ui-accent pl-2.5 text-sm leading-relaxed text-ui-text-muted">
+  <div
+    :data-agent-progress-for="progress.sourceId"
+    :data-sa-progress-rail="progressAccentSlot !== undefined ? 'true' : undefined"
+    :data-sa-accent-slot="progressAccentSlot"
+    class="my-1 border-l-2 pl-2.5 text-sm leading-relaxed text-ui-text-muted"
+    :class="progressAccentSlot !== undefined ? 'sa-ticket-accent sa-ticket-rail' : 'border-ui-accent'"
+  >
     <div role="status" aria-atomic="true">
       <div v-for="(step, index) in progress.steps" :key="index">
         <template v-if="step.title">{{ step.title }} · </template>{{ t(`superAgent.progress.${step.state === "stopping" && unreachable ? "unconfirmed" : step.state}`) }}

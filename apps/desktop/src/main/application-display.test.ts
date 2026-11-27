@@ -49,15 +49,18 @@ test("packaging display name stays separate from the existing secure-storage ide
   expect(variant).toMatch(/^  productName: DeskFleet Workspace Agent$/mu)
 })
 
-test("the SA variant presents its new name in the native menus while keeping its runtime name", () => {
+test.each([
+  ["DeskFleet Workspace Agent", "DeskFleet SA"],
+  ["DeskFleet SA Preview", "DeskFleet SA Preview"],
+])("the %s variant displays %s in the native menus and keeps its runtime name", (name, displayName) => {
   const original = app.name
   try {
-    app.name = "DeskFleet Workspace Agent"
+    app.name = name
     menu.items[0]!.label = app.name
     configureApplicationDisplay()
-    expect(menu.items[0]?.label).toBe("DeskFleet SA")
-    expect(setAboutPanelOptions).toHaveBeenCalledWith(expect.objectContaining({ applicationName: "DeskFleet SA" }))
-    expect(app.name).toBe("DeskFleet Workspace Agent")
+    expect(menu.items[0]?.label).toBe(displayName)
+    expect(setAboutPanelOptions).toHaveBeenCalledWith(expect.objectContaining({ applicationName: displayName }))
+    expect(app.name).toBe(name)
   } finally {
     app.name = original
   }

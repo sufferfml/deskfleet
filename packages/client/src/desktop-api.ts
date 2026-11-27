@@ -41,8 +41,10 @@ export interface SuperFeedbackHandle {
   initial: SuperFeedbackSubscribeResult
   unsubscribe(): Promise<void>
 }
-export type SuperAgentApi = Omit<SuperAgentActions, "stop" | "archiveTicket" | "followUpAuth" | "followUpSources" | "followUpUpdateSource" | "followUpRuns" | "feedbackSubscribe" | "feedbackUnsubscribe" | "feedbackProcess"> & {
+export type SuperAgentApi = Omit<SuperAgentActions, "stop" | "archiveTicket" | "linkMessage" | "createTicket" | "followUpAuth" | "followUpSources" | "followUpUpdateSource" | "followUpRuns" | "feedbackSubscribe" | "feedbackUnsubscribe" | "feedbackProcess" | "summary" | "markRead"> & {
   archiveTicket?: SuperAgentActions["archiveTicket"]
+  linkMessage?: SuperAgentActions["linkMessage"]
+  createTicket?: SuperAgentActions["createTicket"]
   stop?: SuperAgentActions["stop"]
   history?: (params: SuperHistoryRequest) => Promise<SuperHistory>
   followUpAuth?: SuperAgentActions["followUpAuth"]
@@ -55,6 +57,8 @@ export type SuperAgentApi = Omit<SuperAgentActions, "stop" | "archiveTicket" | "
     onDisconnect?: () => void,
   ) => Promise<SuperFeedbackHandle>
   feedbackProcess?: (params: SuperFeedbackProcessParams) => Promise<SuperFeedbackProcessResult>
+  summary?: SuperAgentActions["summary"]
+  markRead?: SuperAgentActions["markRead"]
 }
 
 /** The host platform adapter configured for the shared application. */

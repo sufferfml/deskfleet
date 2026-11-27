@@ -1,0 +1,13 @@
+extends: ./electron-builder.super-agent.yml
+appId: io.github.yet-another-ai.deskfleet.workspace-agent.preview
+productName: DeskFleet SA Preview
+executableName: deskfleet-sa-preview
+extraMetadata:
+  name: deskfleet-sa-preview
+  # Electron keys its default profile, instance lock and Safe Storage by this name.
+  productName: DeskFleet SA Preview
+artifactName: "DeskFleet-SA-Preview-${version}-${os}-${arch}.${ext}"
+publish: null
+mac:
+  identity: "-"
+  notarize: false

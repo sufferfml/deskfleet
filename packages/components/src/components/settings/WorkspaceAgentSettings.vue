@@ -1,10 +1,15 @@
 <script setup lang="ts">
-import { computed, onScopeDispose, ref, watch } from "vue"
+import { computed, onBeforeUnmount, onScopeDispose, ref, watch } from "vue"
 import { useI18n } from "vue-i18n"
 import type { FollowUpAuthSummary, SuperHistoryGroup } from "@deskfleet/protocol/super-agent"
 import { useAccountSession } from "../../composables/useAccountSession.ts"
 import { useMachineRuntimes } from "../../composables/useMachineRuntimes.ts"
 import { usePlatformClient } from "../../composables/usePlatformClient.ts"
+import {
+  MAX_WORKSPACE_AGENT_DISPLAY_NAME_LENGTH,
+  normalizeWorkspaceAgentDisplayName,
+  useWorkspaceAgentDisplayName,
+} from "../../composables/useWorkspaceAgentDisplayName.ts"
 import {
   disableTakeoverOnMachine, enableTakeoverOnMachine, hasPendingFollowUpRevocation, listPendingRevocationsForAccount,
   revokeAllScopesForInstallation, syncAndFlushPendingRevocation,
@@ -20,6 +25,47 @@ import SettingsRow from "./SettingsRow.vue"
 
 const { t } = useI18n()
 const enabled = useWorkspaceAgentMode()
+const { customName: savedDisplayName } = useWorkspaceAgentDisplayName(() => t("superAgent.role.assistant"))
+const displayNameDraft = ref(savedDisplayName.value)
+let displayNameComposing = false
+
+watch(savedDisplayName, next => {
+  if (normalizeWorkspaceAgentDisplayName(displayNameDraft.value) !== next) {
+    displayNameDraft.value = next
+  }
+})
+
+function syncDisplayName(): void {
+  savedDisplayName.value = displayNameDraft.value
+}
+
+function onDisplayNameInput(): void {
+  if (!displayNameComposing) syncDisplayName()
+}
+
+function onDisplayNameCompositionEnd(): void {
+  displayNameComposing = false
+  syncDisplayName()
+}
+
+function commitDisplayName(): void {
+  displayNameComposing = false
+  syncDisplayName()
+  displayNameDraft.value = savedDisplayName.value
+}
+
+function onDisplayNameEnter(event: KeyboardEvent): void {
+  if (event.isComposing || displayNameComposing) return
+  event.preventDefault()
+  commitDisplayName()
+}
+
+onBeforeUnmount(() => {
+  if (normalizeWorkspaceAgentDisplayName(displayNameDraft.value) !== savedDisplayName.value) {
+    syncDisplayName()
+  }
+})
+
 const client = usePlatformClient()
 const account = useAccountSession()
 const runtimes = useMachineRuntimes()
@@ -83,6 +129,8 @@ watch(enabled, async (next, prev) => {
   busy.value = false
   followUpError.value = ""
   followUpNotice.value = ""
+  displayNameComposing = false
+  displayNameDraft.value = savedDisplayName.value
   if (prev === true && next === false) {
     const hasKnownGrants = listPendingRevocationsForAccount(scope.value.serverUrl, scope.value.userId).length > 0 || !!client.superAgent?.followUpAuth
     if (hasKnownGrants || account?.account.value.user?.id) {
@@ -208,6 +256,27 @@ async function organize(group?: SuperHistoryGroup) {
       </SettingsRow>
       <p v-if="!enabled && pendingRevocation" role="status" class="mx-4 mb-3 text-sm text-ui-text-muted">{{ t("superAgent.followUp.pendingRevocation", { machine: machineName }) }}</p>
       <p v-else-if="followUpNotice" role="status" class="mx-4 mb-3 text-sm text-ui-text-muted">{{ followUpNotice }}</p>
+      <SettingsRow v-if="enabled" :label="t('superAgent.mode.displayName')" label-id="workspace-agent-display-name" description-id="workspace-agent-display-name-description">
+        <template #description>{{ t("superAgent.mode.displayNameDescription") }}</template>
+        <input
+          v-model="displayNameDraft"
+          type="text"
+          name="super-agent-display-name"
+          data-super-agent-display-name
+          class="ui-input w-56 max-w-full"
+          :placeholder="t('superAgent.role.assistant')"
+          :maxlength="MAX_WORKSPACE_AGENT_DISPLAY_NAME_LENGTH"
+          autocomplete="off"
+          aria-labelledby="workspace-agent-display-name"
+          aria-describedby="workspace-agent-display-name-description"
+          @compositionstart="displayNameComposing = true"
+          @compositionend="onDisplayNameCompositionEnd"
+          @input="onDisplayNameInput"
+          @change="commitDisplayName"
+          @blur="commitDisplayName"
+          @keydown.enter="onDisplayNameEnter"
+        >
+      </SettingsRow>
       <template v-if="enabled && client.superAgent?.followUpAuth && hostSupportsFollowUp">
         <SettingsRow :label="t('superAgent.followUp.takeoverAllLabel')" label-id="workspace-takeover-all" description-id="workspace-takeover-all-description">
           <template #description>

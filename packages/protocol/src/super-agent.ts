@@ -60,6 +60,88 @@ export type {
   SuperWorkerReportReceipt,
 } from "./super-agent-feedback.ts"
 
+import type {
+  SaVisibleMarkerRef,
+  SuperMachineSummary,
+  SuperMarkReadParams,
+  SuperWorkspaceSummary,
+} from "./super-agent-unread.ts"
+
+export type {
+  ComputeSaWorkspaceSummaryInput,
+  SaVisibleMarker,
+  SaVisibleMarkerRef,
+  SuperMachineSummary,
+  SuperMarkReadParams,
+  SuperWorkspaceActivity,
+  SuperWorkspaceSummary,
+} from "./super-agent-unread.ts"
+
+export {
+  computeSaSummaryFromSnapshot,
+  computeSaWorkspaceSummary,
+  extractSaVisibleMarkers,
+  isSaSummaryUnread,
+  mergeSaActivity,
+  mergeSaMarkerRef,
+  parseSuperMarkRead,
+  pickLatestSaMarker,
+} from "./super-agent-unread.ts"
+
+export type {
+  AccentSlotTicketInput,
+  SuperTicketAccentPaletteEntry,
+  SuperTicketAccentThemeStyle,
+} from "./super-agent-accent.ts"
+
+export {
+  createEmptyAccentSlotCounts,
+  formatTicketShortLabel,
+  hexToOklab,
+  isValidAccentSlot,
+  oklabDistanceBetweenHex,
+  recordRecentAccentSlotValue,
+  resolveRoomTicketAccentSlots,
+  SA_ACCENT_DISTANCE_THRESHOLD,
+  SA_ACCENT_OKLAB_DISTANCE_TABLE,
+  SA_ACCENT_PALETTE,
+  SA_ACCENT_RECENT_LIMIT,
+  SA_ACCENT_SLOT_COUNT,
+  selectTicketAccentSlot,
+  stableAccentHash,
+  wcagContrastRatio,
+  wcagRelativeLuminance,
+} from "./super-agent-accent.ts"
+
+import type {
+  SuperCreateTicketParams,
+  SuperLinkMessageParams,
+  SuperMessageTicketLinks,
+} from "./super-agent-links.ts"
+
+export type {
+  CanonicalLinkMessage,
+  SuperCreateTicketParams,
+  SuperLinkMessageParams,
+  SuperMessageTicketLinks,
+} from "./super-agent-links.ts"
+
+export {
+  dedupeTicketIds,
+  messageMatchesTicketFocus,
+  parseSuperCreateTicket,
+  parseSuperLinkMessage,
+  resolveCanonicalMessageTicketIds,
+} from "./super-agent-links.ts"
+
+export type { StoppedTurnTicketLike } from "./super-agent-reedit.ts"
+
+export {
+  isConfirmedStoppedTurn,
+  parseSuperReusedAttachments,
+  resolveSupersededStoppedTurns,
+} from "./super-agent-reedit.ts"
+
 /** Wire types for the personal, machine-local workspace front desk. null denotes the default conversation. */
 export type SuperWorkspaceId = string | null
 /** Configured provider instance ID within this machine registration. */
@@ -100,10 +182,14 @@ export interface SuperMessage {
   /** This input was delivered into an existing turn along with another input. */
   sharedTurn?: boolean
   replyTo?: string
+  /** Explicit user message ID of the confirmed-stopped turn revised by this message. */
+  reEditOf?: string
   /** The execution target chosen when submitting a provider slash command. */
   command?: SuperWorkerCommandTarget
   mentions?: ComposerMention[]
   ticketId?: string
+  /** Canonical ordered list of associated ticket IDs shared by message coloring and focus filtering. */
+  ticketIds?: string[]
   sessionId?: string
   inputId?: string
   turnId?: string
@@ -125,6 +211,8 @@ export interface SuperMessage {
   truncated?: boolean
   /** True when a Worker turn ended without an identifiable final answer boundary. */
   unboundedOutcome?: boolean
+  /** Monotonic room-local visible sequence assigned when this message or error becomes unread-eligible. */
+  visibleSeq?: number
 }
 
 export interface SuperTicket {
@@ -135,6 +223,8 @@ export interface SuperTicket {
   summary: string
   /** Only active work, interruptions and failures have a status. Results remain in the conversation. */
   status?: SuperTicketStatus
+  /** Permanent 0..47 accent slot assigned once on ticket creation; absent on legacy records. */
+  accentSlot?: number
   provider: string
   sessionId?: string
   referenceTicketId?: string
@@ -169,7 +259,10 @@ export interface SuperWorkspace { id: string; name: string; roots: string[] }
 
 export interface SuperSnapshot {
   supportsTicketArchive?: boolean
+  supportsTicketLinks?: boolean
   supportsStop?: boolean
+  /** Host supports explicit stopped-turn re-edit linkage and attachment reuse. */
+  supportsStoppedReEdit?: boolean
   /** Host supports real-time main-conversation feedback (opening ack, milestones, collapsible progress). */
   supportsReplyFeedback?: boolean
   /** Optional feedback snapshot extension; older clients ignore it and keep existing transcript behavior. */
@@ -207,19 +300,29 @@ export interface SuperSnapshot {
   workspaceId: SuperWorkspaceId
   messages: SuperMessage[]
   tickets: SuperTicket[]
+  /** Canonical message-to-ticket association map shared by coloring and ticket focus filtering. */
+  messageTicketLinks?: SuperMessageTicketLinks
   provider: string
   focusTicketId?: string
+  /** Last SA visible message position acknowledged by this user in the viewport. */
+  lastRead?: SaVisibleMarkerRef
+  /** User-actionable error keys acknowledged by this user in the viewport. */
+  readErrorKeys?: string[]
+  /** Highest Worker completion sequence already delivered into this SA room, keyed by Worker session ID. */
+  delegatedCompletedSeqs?: Record<string, string>
 }
 
 export interface SuperWorkerCommandTarget { provider: string; ticketId?: string; sessionId?: string }
 
 /** The command catalog and delivery must refer to the same Worker. A quote takes precedence over focus. */
-export function superWorkerCommandTarget(room: Pick<SuperSnapshot, "messages" | "tickets" | "provider" | "focusTicketId" | "feedback">, replyTo?: string): SuperWorkerCommandTarget {
+export function superWorkerCommandTarget(room: Pick<SuperSnapshot, "messages" | "tickets" | "provider" | "focusTicketId" | "feedback" | "messageTicketLinks">, replyTo?: string): SuperWorkerCommandTarget {
   const quote = replyTo ? room.messages.find(message => message.id === replyTo) : undefined
   const quotedFeedback = !quote && replyTo ? room.feedback?.items.find(item => item.itemId === replyTo) : undefined
+  const linked = quote ? room.messageTicketLinks?.[quote.id] ?? quote.ticketIds : undefined
+  const linkedSingle = linked?.length === 1 ? linked[0] : undefined
   const sourceId = quote?.role === "assistant" && !quote.ticketId ? quote.sourceMessageId : quotedFeedback?.sourceMessageId
   const ticketId = replyTo
-    ? (quote?.ticketId ?? quotedFeedback?.ticketId ?? (sourceId && room.messages.find(message => message.id === sourceId)?.ticketId))
+    ? (quote?.ticketId ?? linkedSingle ?? quotedFeedback?.ticketId ?? (sourceId && room.messages.find(message => message.id === sourceId)?.ticketId))
     : room.focusTicketId
   const ticket = ticketId ? room.tickets.find(item => item.id === ticketId) : undefined
   if (ticket?.archiveState || !replyTo && ticket?.status === "stopped") return { provider: room.provider }
@@ -233,10 +336,14 @@ export function superWorkerCommandName(text: string): string | undefined {
 export interface SuperSend {
   mentions?: ComposerMention[]
   attachments?: AgentInput["content"]
+  /** Preserved attachments copied from an earlier user message in the same workspace conversation. */
+  reusedAttachments?: SuperAttachmentRequest[]
   workspaceId: SuperWorkspaceId
   messageId: string
   text: string
   replyTo?: string
+  /** Explicit user message ID of the confirmed-stopped turn that this message revises. */
+  reEditOf?: string
   retry?: boolean
   command?: SuperWorkerCommandTarget
   /** Valid IANA time zone of the sending device for natural-language schedule commands. */
@@ -271,6 +378,8 @@ export interface SuperMethods {
   "_deskfleet/super-agent/send": { params: SuperSend; result: SuperSnapshot }
   "_deskfleet/super-agent/stop": { params: SuperStop; result: SuperSnapshot }
   "_deskfleet/super-agent/correct": { params: SuperCorrection; result: SuperSnapshot }
+  "_deskfleet/super-agent/linkMessage": { params: SuperLinkMessageParams; result: SuperSnapshot }
+  "_deskfleet/super-agent/createTicket": { params: SuperCreateTicketParams; result: SuperSnapshot }
   "_deskfleet/super-agent/settings": { params: SuperSettings; result: SuperSnapshot }
   "_deskfleet/super-agent/followUpAuth": { params: FollowUpAuthMutation; result: FollowUpAuthReceipt }
   "_deskfleet/super-agent/followUpSources": { params: { workspaceId: SuperWorkspaceId }; result: FollowUpSourcesResponse }
@@ -279,6 +388,8 @@ export interface SuperMethods {
   "_deskfleet/super-agent/feedbackSubscribe": { params: SuperFeedbackSubscribeParams; result: SuperFeedbackSubscribeResult }
   "_deskfleet/super-agent/feedbackUnsubscribe": { params: SuperFeedbackUnsubscribeParams; result: null }
   "_deskfleet/super-agent/feedbackProcess": { params: SuperFeedbackProcessParams; result: SuperFeedbackProcessResult }
+  "_deskfleet/super-agent/summary": { params: Record<string, never>; result: SuperMachineSummary }
+  "_deskfleet/super-agent/markRead": { params: SuperMarkReadParams; result: SuperWorkspaceSummary }
 }
 
 export function superRequestObject(value: unknown): Record<string, unknown> {

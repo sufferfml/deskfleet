@@ -7,6 +7,7 @@ import { useRoute, useRouter } from "vue-router"
 import { useAccountSession } from "../../composables/useAccountSession.ts"
 import { useSessionLabel } from "../../composables/useSessionLabel.ts"
 import { pinnedSessionOrderGroup, useSidebarOrder } from "../../composables/useSidebarOrder.ts"
+import { useWorkspaceAgentSummary } from "../../composables/useWorkspaceAgentSummary.ts"
 import { sessionIsUnread } from "../../services/agent-conversation.ts"
 import { usePinnedSessionsStore } from "../../stores/pinned-sessions.ts"
 import SessionContextMenu from "../session/SessionContextMenu.vue"
@@ -16,10 +17,11 @@ import SessionUnreadIndicator from "./SessionUnreadIndicator.vue"
 import SessionPullRequestIndicators from "./SessionPullRequestIndicators.vue"
 import SidebarReorderRow from "./SidebarReorderRow.vue"
 
-defineProps<{ collapsible?: boolean }>()
+const props = defineProps<{ collapsible?: boolean }>()
 const { t } = useI18n()
 const id = useId()
 const pins = usePinnedSessionsStore()
+const saSummary = useWorkspaceAgentSummary()
 const expanded = ref(false)
 const account = useAccountSession()
 const route = useRoute()
@@ -31,6 +33,15 @@ const orderedPins = computed(() => sidebarOrder.ordered(pinnedSessionOrderGroup,
   ...item, id: JSON.stringify([item.machineId, item.sessionId]),
 }))))
 const pinLabel = (item: { sessionId: string; title: string }) => sessionLabel({ id: item.sessionId, title: item.title })
+function pinWorking(item: (typeof orderedPins.value)[number]) {
+  if (props.collapsible && !item.online) return false
+  return item.archiveState === "archiving" ? "archiving" : item.working
+}
+function pinUnread(item: (typeof orderedPins.value)[number]) {
+  if (!sessionIsUnread(item)) return false
+  if (!props.collapsible) return true
+  return !saSummary.isDelegatedWorkerSuperseded(item.machineId, item.sessionId, item.lastCompletedSeq)
+}
 
 function active(machineId: string, sessionId: string): boolean {
   return route.name === "session" && route.params.sessionId === sessionId
@@ -65,8 +76,8 @@ function open(machineId: string, sessionId: string): void {
               <Pin :size="15" :stroke-width="1.75" class="shrink-0" aria-hidden="true" />
               <span class="min-w-0 flex-1 truncate">{{ pinLabel(item) }}</span>
               <SessionPullRequestIndicators :machine-id="item.machineId" :session-id="item.sessionId" />
-              <SessionWorkingIndicator v-if="item.archiveState === 'archiving' || item.working" :state="item.archiveState === 'archiving' ? 'archiving' : item.working" />
-              <SessionUnreadIndicator v-else-if="sessionIsUnread(item)" />
+              <SessionWorkingIndicator v-if="pinWorking(item)" :state="pinWorking(item)" />
+              <SessionUnreadIndicator v-else-if="pinUnread(item)" />
               <span v-if="!item.online" class="inline-flex shrink-0 items-center text-ui-warning" :title="t('machine.offline')">
                 <Unplug :size="14" :stroke-width="1.75" aria-hidden="true" />
                 <span class="sr-only">{{ t('machine.offline') }}</span>

@@ -12,7 +12,8 @@ import { FILE_PREVIEW_BYTES } from "@deskfleet/protocol/files"
 import type { SuperAttachmentInfo, SuperAttachmentPreview } from "@deskfleet/protocol/super-agent"
 
 type Block = AgentInput["content"][number]
-type Attachment = Extract<Block, { type: "resource" | "resource_link" | "image" }>
+export type SuperAttachment = Extract<Block, { type: "resource" | "resource_link" | "image" }>
+type Attachment = SuperAttachment
 export type SuperImage = Extract<Block, { type: "image" }>
 type AttachmentPreview = SuperAttachmentInfo & { excerpt?: string; truncated?: boolean; image?: number; unavailable?: boolean }
 export type SuperAttachmentContext = { previews: AttachmentPreview[]; images: SuperImage[] }
@@ -43,6 +44,13 @@ export function superAttachments(value: unknown): Attachment[] {
   return result
 }
 
+export function assertAttachmentBudget(blocks: readonly Attachment[]): void {
+  if (blocks.length > 99) throw new Error("Invalid workspace message attachments")
+  if (Buffer.byteLength(JSON.stringify(blocks.map(({ _meta, ...block }) => block))) > AGENT_MESSAGE_BYTES) {
+    throw new Error("Workspace message attachments exceed the machine channel limit")
+  }
+}
+
 export function attachmentInfo(block: Attachment): SuperAttachmentInfo {
   if (block.type === "resource_link") return { type: block.type, name: block.name }
   if (block.type === "image") return { type: block.type, name: block.mimeType }
@@ -63,7 +71,7 @@ export class SuperAttachmentStore {
   key(messageId: string, blocks: Attachment[]): string {
     return digest(JSON.stringify([messageId, blocks.map(({ _meta, ...block }) => block)]))
   }
-  async save(uid: string, key: string, blocks: Attachment[], roots: string[]): Promise<void> {
+  async save(uid: string, key: string, blocks: Attachment[], roots: string[], trustedPaths?: ReadonlySet<string>): Promise<void> {
     const owner = join(this.root, digest(uid))
     const destination = join(owner, key)
     if (await access(join(destination, "content.json")).then(() => true, () => false)) return
@@ -78,7 +86,8 @@ export class SuperAttachmentStore {
         const grant = block._meta?.["deskfleet/attachmentGrant"]
         const hasGrant = typeof grant === "string" && grant.length === 64 &&
           timingSafeEqual(Buffer.from(grant), Buffer.from(this.fileGrant(uid, path)))
-        if (!hasGrant && !allowed.some(root => {
+        const trusted = trustedPaths?.has(path) === true
+        if (!hasGrant && !trusted && !allowed.some(root => {
           if (!root) return false
           const rel = relative(root, path)
           return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
@@ -117,6 +126,19 @@ export class SuperAttachmentStore {
       blocks.push(...JSON.parse(await readFile(join(this.root, digest(uid), key, "content.json"), "utf8")) as Attachment[])
     }
     return blocks
+  }
+  /** Resolve one immutable attachment from an earlier user message owned by `uid` for safe reuse on re-edit. */
+  async resolveReused(uid: string, keys: readonly string[], index: number): Promise<{ block: Attachment; trustedPath?: string }> {
+    const block = (await this.load(uid, keys))[index]
+    if (!block) throw new Error("Attachment unavailable in this conversation")
+    if (block.type !== "resource_link") return { block }
+    const owner = await realpath(join(this.root, digest(uid)))
+    const path = await realpath(fileURLToPath(block.uri))
+    const parts = relative(owner, path).split(sep)
+    if (parts.length !== 3 || !keys.includes(parts[0]!) || !/^\d+$/u.test(parts[1]!)) {
+      throw new Error("Attachment unavailable in this conversation")
+    }
+    return { block, trustedPath: path }
   }
   /** Only callers that resolved the message in the owner's room can supply these ledger keys. */
   async preview(uid: string, keys: readonly string[], index: number): Promise<SuperAttachmentPreview> {

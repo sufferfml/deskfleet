@@ -1,13 +1,14 @@
 import { app, Menu, MenuItem } from "electron"
 import { buildResourcePath } from "./paths.ts"
+import { saDisplayName } from "./sa-variant.ts"
 
 export function desktopDisplayName(): string {
-  return app.name === "DeskFleet Workspace Agent" ? "DeskFleet SA" : "DeskFleet"
+  return saDisplayName(app.name) ?? "DeskFleet"
 }
 
 function updateMenuLabels(menu: Menu, displayName: string): void {
   for (const item of menu.items) {
-    if (item.label) item.label = item.label.replace(/\bdeskfleet(?: workspace agent| sa)?\b/gi, displayName)
+    if (item.label) item.label = item.label.replace(/\bdeskfleet(?: workspace agent| sa(?: preview)?)?\b/gi, displayName)
     if (item.submenu) updateMenuLabels(item.submenu, displayName)
   }
 }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import SpringSurface from "../common/SpringSurface.ts"
-import { Pencil, Trash2 } from "@lucide/vue"
+import { Eye, EyeOff, Pencil, Trash2 } from "@lucide/vue"
 import { useAsyncState } from "@vueuse/core"
 import { ContextMenuContent, ContextMenuItem, ContextMenuPortal, ContextMenuRoot, ContextMenuTrigger, DialogTitle } from "reka-ui"
 import { computed, ref, useTemplateRef, watch } from "vue"
@@ -8,6 +8,7 @@ import { useI18n } from "vue-i18n"
 import { useRoute, useRouter } from "vue-router"
 import type { CatalogDirectory } from "@deskfleet/client/catalog"
 import { useAccountSession } from "../../composables/useAccountSession.ts"
+import { useHiddenWorkspaces } from "../../composables/useHiddenWorkspaces.ts"
 import { useFleetStore } from "../../stores/fleet.ts"
 import UiButton from "../common/UiButton.vue"
 import UiDialog from "../common/UiDialog.vue"
@@ -17,6 +18,8 @@ const props = defineProps<{ workspaceId: string; machineId: string; name: string
 const { t } = useI18n()
 const fleet = useFleetStore()
 const account = useAccountSession()
+const hiddenWorkspaces = useHiddenWorkspaces()
+const hidden = computed(() => hiddenWorkspaces.isHidden(props.machineId, props.workspaceId))
 const route = useRoute()
 const router = useRouter()
 const row = useTemplateRef<HTMLElement>("row")
@@ -47,6 +50,7 @@ const { isLoading: pending, error, executeImmediate: remove } = useAsyncState(as
   const ownsPage = activeWorkspace() === props.workspaceId
   if (workspaceSessions.value.length) await fleet.deleteWorkspace(props.workspaceId, { deleteSessions: true })
   else await fleet.deleteWorkspace(props.workspaceId)
+  hiddenWorkspaces.unhide(props.machineId, props.workspaceId)
   dialog.value = undefined
   if (ownsPage && path === route.fullPath && selectedMachine()) await router.replace({ name: "new-session" })
 }, undefined, { immediate: false })
@@ -91,6 +95,11 @@ function choose(action: "edit" | "delete"): void {
   focusRow()
   open.value = false
 }
+function toggleHidden(): void {
+  open.value = false
+  if (hidden.value) hiddenWorkspaces.unhide(props.machineId, props.workspaceId)
+  else hiddenWorkspaces.hide(props.machineId, props.workspaceId)
+}
 function confirm(): void {
   if (!pending.value && !props.disabled) void remove()
 }
@@ -108,6 +117,7 @@ defineExpose({ cursor, pointerReference })
     <ContextMenuPortal>
       <ContextMenuContent :as="SpringSurface" :reference="pointerReference" :aria-label="name" :collision-padding="8" class="ui-menu z-50 flex w-48 flex-col" loop @close-auto-focus="closeFocus" @interact-outside="dialog && $event.preventDefault()">
         <ContextMenuItem as="button" type="button" class="ui-menu-item" :disabled="disabled" @select="choose('edit')"><Pencil :size="14" aria-hidden="true" />{{ t('workspace.edit') }}</ContextMenuItem>
+        <ContextMenuItem as="button" type="button" class="ui-menu-item" :data-workspace-action="hidden ? 'unhide' : 'hide'" @select="toggleHidden"><component :is="hidden ? Eye : EyeOff" :size="14" aria-hidden="true" />{{ t(hidden ? 'workspace.unhide' : 'workspace.hide') }}</ContextMenuItem>
         <ContextMenuItem as="button" type="button" class="ui-menu-item text-ui-danger" :disabled="disabled" @select="choose('delete')"><Trash2 :size="14" aria-hidden="true" />{{ t('workspace.delete') }}</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenuPortal>

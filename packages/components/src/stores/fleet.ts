@@ -296,6 +296,9 @@ export const useFleetStore = defineStore("fleet", () => {
     await refreshLocalDesktop(options)
     await refreshLocalCatalog(options)
   }
+  async function waitForCatalogRefresh(): Promise<void> {
+    await Promise.allSettled([refreshingTarget, refreshingCatalog].filter(Boolean))
+  }
   const unsubscribe = platformClient.catalog.onChanged(sessionId => {
     // A remote machine's presence and renames arrive as catalog changes. Its catalog,
     // applied after the target, carries the current Team name.
@@ -384,7 +387,7 @@ export const useFleetStore = defineStore("fleet", () => {
 
   return {
     targetId, machines, catalog, catalogIdentity, catalogError, catalogLoading, catalogReady, canManageCatalog,
-    localDesktopTarget, refreshLocalDesktop, refreshLocalCatalog, refreshLocal,
+    localDesktopTarget, refreshLocalDesktop, refreshLocalCatalog, refreshLocal, waitForCatalogRefresh,
     createWorkspace, updateWorkspace, deleteWorkspace, setHistoryLinks,
     newSessionTarget, findMachine, findWorkspace, findWorktree, findSession, findTerminal,
     collapsedMachineIds, isCollapsed, toggleMachine, targetWorkspaceId, targetWorkspace,

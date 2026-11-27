@@ -155,12 +155,14 @@ export async function openHarness(directory: string, options: {
   await schedules.init()
   const operations = new MachineOperations({ agents, catalog, providers, terminals, setup, schedules, capabilities: async () => ({ displays: [], audio: false }) })
   const ws = superWorkspaces(catalog, directory)
+  let frontDesk: SuperAgentService | undefined
   const followUp = new SuperFollowUpService({
     followUpStore, superStore, agents, schedules, authorize: followUpAuth,
     workspaces: ws.workspaces,
     historyCatalog: ws.historyCatalog,
     onCatalogChanged: listener => catalog.onChange(() => listener()),
     triageModel: options.triageModel,
+    onRoomChanged: (uid, wid, sourceId) => frontDesk?.notifySnapshotDirty(uid, wid, sourceId),
     now: options.now,
     retryBaseMs: options.retryBaseMs ?? 60_000,
     retryMaxMs: options.retryMaxMs ?? 60_000,
@@ -177,7 +179,7 @@ export async function openHarness(directory: string, options: {
     listScheduleRuns: async (uid, wid, sid, limit) => (await followUp.listRuns({ userId: uid, workspaceId: wid, sourceKind: "schedule", sourceId: sid, limit })).runs,
     getScheduleRun: (uid, wid, sid, runId) => followUp.getScheduleRun(uid, wid, sid, runId),
   }
-  const frontDesk = new SuperAgentService({
+  frontDesk = new SuperAgentService({
     registration: () => ({ teamId: "team-1", machineId: "machine-1" }),
     coordinatorOptions: async () => ({ models: [], defaultReasoningEfforts: [] }),
     coordinatorModel: () => options.model ?? (async () => ({ reason: "default", actions: [{ kind: "answer", text: "ok" }] })),

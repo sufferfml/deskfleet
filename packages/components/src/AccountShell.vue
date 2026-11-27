@@ -30,6 +30,7 @@ import { useErrorReportingUser } from "./composables/useErrorReportingUser.ts"
 import { trackEvent, useFeatureGate } from "./services/analytics.ts"
 import { billingReturn } from "./services/billing-events.ts"
 import { createMachineRuntimes, machineRuntimesKey } from "./composables/useMachineRuntimes.ts"
+import { workspaceAgentSummaryKey } from "./composables/useWorkspaceAgentSummary.ts"
 import {
   clearFollowUpCacheForAccount, flushPendingRevocationsForAccount,
   listAuthorizedFollowUpScopes, listPendingRevocationsForAccount,
@@ -89,6 +90,7 @@ batteries.attachAccount(session)
 provide(machineBatteriesKey, batteries)
 const runtimes = createMachineRuntimes(props.host, session, useAppearanceStore(), useOutlineAudioStore(), batteries)
 provide(machineRuntimesKey, runtimes)
+if (runtimes.workspaceAgentSummary) provide(workspaceAgentSummaryKey, runtimes.workspaceAgentSummary)
 const stopBeforeSignOut = session.onBeforeSignOut?.(async ({ serverUrl, userId }) => {
   // ONLY revoke machines where THIS installation actually holds an enabled grant or an unconfirmed
   // pending revocation. A classic device that never enabled SA must send ZERO disable requests

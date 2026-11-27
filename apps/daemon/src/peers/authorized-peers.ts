@@ -243,7 +243,8 @@ export class AuthorizedPeers {
               || method === "_deskfleet/super-agent/followUpRuns"
               || (method === "_deskfleet/super-agent/followUpAuth" && !!params && typeof params === "object" && (params as { action?: unknown }).action === "status")
             const readingFeedback = method === "_deskfleet/super-agent/feedbackProcess"
-            this.#live(id, method === "_deskfleet/super-agent/snapshot" || readingHistory || readingFollowUp || readingFeedback ? "agent:read" : "agent:execute")
+            const readingSummary = method === "_deskfleet/super-agent/summary" || method === "_deskfleet/super-agent/markRead"
+            this.#live(id, method === "_deskfleet/super-agent/snapshot" || readingSummary || readingHistory || readingFollowUp || readingFeedback ? "agent:read" : "agent:execute")
             return this.#superAgent!(method, params, owned.authorization.actor)
           },
         } : {}),

@@ -52,8 +52,10 @@ saved catalog, conversation, and terminal history remain.
 downloads its platform binary the first time it is resolved.
 
 Set `VITE_DESKFLEET_SERVER_URL` before starting development or building the app
-to choose the backend; it defaults to `http://localhost:8080`. For example, in
-PowerShell:
+to choose the backend. With no override, the installed DeskFleet SA app uses
+`https://deskfleet.yetanother.ai`. Development and standard DeskFleet builds
+default to `http://localhost:8080`. In PowerShell, set the variable before
+running the build command.
 
 ```powershell
 $env:VITE_DESKFLEET_SERVER_URL = "https://api.example.com"

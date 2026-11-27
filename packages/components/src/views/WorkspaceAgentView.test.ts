@@ -842,12 +842,12 @@ test.each([false, true])("stored history ranges stay hidden and Worker actions t
   expect(result.find("form").exists()).toBe(false)
 })
 
-test("an unassigned message can still be reassigned from its collapsed details", async () => {
+test("an unassigned message can still be linked from its collapsed entry on legacy hosts", async () => {
   const { api } = await setup(room({ tickets: [ticket("owner")], messages: [message("ask", { state: "answered" })] }))
   const row = wrapper.get('[data-super-message="ask"]')
+  expect(row.get("button[aria-expanded]").text()).toContain("Link to ticket…")
   expect(row.text()).not.toContain("Change ticket")
   await row.get("button[aria-expanded]").trigger("click")
-  await row.findAll("button").find(button => button.text() === "Change ticket")!.trigger("click")
   await row.get("select").setValue("owner")
   await row.get("form").trigger("submit")
   expect(api.correct).toHaveBeenCalledExactlyOnceWith({ workspaceId: "A", messageId: "ask", ticketId: "owner" })
@@ -1680,4 +1680,353 @@ test.each([{ prefix: "$", workspaceId: "A" }, { prefix: "/", workspaceId: null }
   await flushPromises()
   expect(api.send).toHaveBeenCalledExactlyOnceWith({ workspaceId, messageId: expect.any(String), text: prefix + "i-have-adhd" })
   expect(catalog).not.toHaveBeenCalled()
+})
+
+test.each([false, true])("double-clicking a user avatar navigates consecutive user messages from the clicked message while preserving single-click behavior (mobile=%s)", async mobile => {
+  const { api } = await setup(room({
+    messages: [
+      message("u1", { text: "First question" }),
+      message("u2", { text: "Second question" }),
+      message("u3", { text: "Third question" }),
+    ],
+  }), "team", mobile)
+  await wrapper.get("textarea").setValue("Draft in progress")
+  const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
+  const outline = wrapper.getComponent(AgentOutline)
+  const active = () => outline.find('[aria-current="location"]').attributes("aria-label")
+  const u1 = wrapper.get('[data-super-message="u1"]').element
+  const u2 = wrapper.get('[data-super-message="u2"]')
+  const u3 = wrapper.get('[data-super-message="u3"]')
+
+  let bubbledClicks = 0
+  u3.element.addEventListener("click", () => { bubbledClicks++ })
+  await u3.get("[data-user-message-avatar]").trigger("click")
+  await flushPromises()
+  expect(bubbledClicks).toBe(1)
+  expect(scroll).not.toHaveBeenCalled()
+  expect(wrapper.find("[data-conversation-located]").exists()).toBe(false)
+
+  // Start from u2 (not conversation end u3): jumps to u1.
+  await u2.get("[data-user-message-avatar]").trigger("dblclick")
+  await flushPromises()
+  expect(scroll).toHaveBeenCalledTimes(1)
+  expect(scroll.mock.contexts[0]).toBe(u1)
+  expect(scroll).toHaveBeenLastCalledWith({ block: "start", behavior: "instant" })
+  expect(wrapper.get("[data-conversation-located]").element).toBe(u1)
+  expect(active()).toBe("First question")
+
+  // Start from u3: jumps to u2.
+  await u3.get("[data-user-message-avatar]").trigger("dblclick")
+  await flushPromises()
+  expect(scroll).toHaveBeenCalledTimes(2)
+  expect(scroll.mock.contexts[1]).toBe(u2.element)
+  expect(wrapper.get("[data-conversation-located]").element).toBe(u2.element)
+  expect(active()).toBe("Second question")
+  expect(wrapper.get("textarea").element.value).toBe("Draft in progress")
+  expect(api.send).not.toHaveBeenCalled()
+})
+
+test("double-clicking a user avatar skips intermediate SA replies, feedback records, approvals, and worker outputs", async () => {
+  const job = ticket("Build navigation")
+  await setup(room({
+    supportsReplyFeedback: true,
+    tickets: [job],
+    feedback: {
+      cursor: 2,
+      previewGeneration: "gen-1",
+      items: [
+        { itemId: "ack-1", sourceMessageId: "u1", revision: 0, seq: 1, kind: "ack", status: "completed", text: "Working on it", createdAt: "now", updatedAt: "now" },
+        { itemId: "ms-1", sourceMessageId: "u1", revision: 0, seq: 2, ticketId: job.id, kind: "milestone", status: "completed", text: "Halfway done", createdAt: "now", updatedAt: "now" },
+      ],
+      processes: [
+        { sourceMessageId: "u1", revision: 0, activityCount: 2, branches: [{ ticketId: job.id, activityCount: 2 }] },
+      ],
+    },
+    messages: [
+      message("u1", { text: "First user ask", state: "assigned", ticketId: job.id }),
+      message("d1", { role: "assistant", kind: "dispatch", sourceMessageId: "u1", ticketId: job.id, text: job.title }),
+      message("a1", { role: "assistant", sourceMessageId: "u1", text: "SA reply 1" }),
+      message("p1", { role: "worker", workerEvent: "permission", sourceMessageId: "u1", ticketId: job.id, turnId: "t1", text: "Allow command" }),
+      message("w1", { role: "worker", workerEvent: "result", sourceMessageId: "u1", ticketId: job.id, turnId: "t1", text: "Worker finished" }),
+      message("a2", { role: "assistant", sourceMessageId: "u1", text: "SA reply 2" }),
+      message("u2", { text: "Second user ask", state: "answered" }),
+      message("a3", { role: "assistant", sourceMessageId: "u2", text: "SA reply 3" }),
+      message("w2", { role: "worker", workerEvent: "result", sourceMessageId: "u2", ticketId: job.id, text: "Worker follow-up" }),
+      message("u3", { text: "Third user ask", state: "answered" }),
+      message("a4", { role: "assistant", sourceMessageId: "u3", text: "SA reply 4" }),
+    ],
+  }), "team")
+
+  expect(wrapper.find('[data-feedback-group-for="u1"]').exists()).toBe(true)
+  const approvalToggle = wrapper.get('[data-approval-history="p1"] button')
+  expect(approvalToggle.attributes("aria-expanded")).toBe("false")
+
+  const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
+  const u1 = wrapper.get('[data-super-message="u1"]').element
+  const u2 = wrapper.get('[data-super-message="u2"]')
+  const u3 = wrapper.get('[data-super-message="u3"]')
+
+  // Double-click u2 while u3/a4 exist later in the transcript: skips SA replies & execution records to locate u1.
+  await u2.get("[data-user-message-avatar]").trigger("dblclick")
+  await flushPromises()
+  expect(scroll).toHaveBeenCalledTimes(1)
+  expect(scroll.mock.contexts[0]).toBe(u1)
+  expect(wrapper.get("[data-conversation-located]").element).toBe(u1)
+  expect(approvalToggle.attributes("aria-expanded")).toBe("false")
+
+  // Double-click u3: skips a3 and w2 to locate u2.
+  await u3.get("[data-user-message-avatar]").trigger("dblclick")
+  await flushPromises()
+  expect(scroll).toHaveBeenCalledTimes(2)
+  expect(scroll.mock.contexts[1]).toBe(u2.element)
+  expect(wrapper.get("[data-conversation-located]").element).toBe(u2.element)
+})
+
+test("double-clicking the first user message avatar keeps the current scroll position even after preceding SA messages", async () => {
+  await setup(room({
+    messages: [
+      message("u1", { text: "Only earlier user message" }),
+      message("a1", { role: "assistant", sourceMessageId: "u1", text: "SA reply" }),
+      message("u2", { text: "Later user message" }),
+    ],
+  }))
+  const viewport = scrollViewport()
+  viewport.element.scrollTop = 320
+  await viewport.trigger("scroll")
+  const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
+
+  // First user message (unattributed local avatar span): no earlier user message, keep current scroll position.
+  await wrapper.get('[data-super-message="u1"] [data-user-message-avatar]').trigger("dblclick")
+  await flushPromises()
+  expect(scroll).not.toHaveBeenCalled()
+  expect(viewport.element.scrollTop).toBe(320)
+  expect(wrapper.find("[data-conversation-located]").exists()).toBe(false)
+
+  // Unattributed local avatar on u2 still navigates to u1.
+  await wrapper.get('[data-super-message="u2"] [data-user-message-avatar]').trigger("dblclick")
+  await flushPromises()
+  expect(scroll).toHaveBeenCalledTimes(1)
+  expect(scroll.mock.contexts[0]).toBe(wrapper.get('[data-super-message="u1"]').element)
+
+  // Preceding non-user SA message before the first user message: still no earlier user message.
+  wrapper.unmount()
+  await setup(room({
+    messages: [
+      message("lead-sa", { role: "assistant", text: "Proactive follow-up summary" }),
+      message("first-user", { text: "First user ask" }),
+      message("sa-reply", { role: "assistant", sourceMessageId: "first-user", text: "SA reply" }),
+    ],
+  }), "team")
+  const viewport2 = scrollViewport()
+  viewport2.element.scrollTop = 240
+  await viewport2.trigger("scroll")
+  scroll.mockClear()
+
+  await wrapper.get('[data-super-message="first-user"] [data-user-message-avatar]').trigger("dblclick")
+  await flushPromises()
+  expect(scroll).not.toHaveBeenCalled()
+  expect(viewport2.element.scrollTop).toBe(240)
+  expect(wrapper.find("[data-conversation-located]").exists()).toBe(false)
+})
+
+test.each([false, true])("clicking a sent message quote locates the exact off-screen original by ID even when two messages share identical text (mobile=%s)", async ios => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+  const duplicateText = "相同内容：请继续检查本轮改动"
+  const filler = Array.from({ length: 12 }, (_, index) => message(`filler-${index}`, {
+    role: index % 2 === 0 ? "user" : "assistant",
+    text: `中间对话 ${index}`,
+    state: index % 2 === 0 ? "answered" : undefined,
+  }))
+  const { api } = await setup(room({
+    messages: [
+      message("orig-1", { role: "assistant", text: duplicateText }),
+      ...filler,
+      message("orig-2", { role: "assistant", text: duplicateText }),
+      message("reply-to-1", { role: "user", text: "回到第一条", replyTo: "orig-1", state: "answered" }),
+      message("reply-to-2", { role: "user", text: "回到第二条", replyTo: "orig-2", state: "answered" }),
+      message("assistant-reply", { role: "assistant", text: "按第一条继续", replyTo: "orig-1" }),
+    ],
+  }), "team", ios)
+
+  const input = wrapper.get<HTMLTextAreaElement>("textarea")
+  await input.setValue("Draft stays untouched")
+  scrollViewport()
+  const orig1 = wrapper.get('[data-super-message="orig-1"]')
+  const orig2 = wrapper.get('[data-super-message="orig-2"]')
+  expect(orig1.classes()).toContain("ui-conversation-history")
+
+  const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
+  const jumpTo1 = wrapper.get('[data-super-message="reply-to-1"] [data-reply-quote="orig-1"] button[data-reply-quote-target]')
+  expect(jumpTo1.attributes("aria-label")).toContain(duplicateText)
+  await jumpTo1.trigger("click")
+  await flushPromises()
+
+  expect(scroll).toHaveBeenCalledTimes(1)
+  expect(scroll.mock.contexts[0]).toBe(orig1.element)
+  expect(scroll.mock.calls[0]?.[0]).toEqual({ block: "start", behavior: "instant" })
+  expect(orig1.attributes("data-conversation-located")).toBe("true")
+  expect(orig1.classes()).not.toContain("ui-conversation-history")
+  expect(orig2.attributes("data-conversation-located")).toBeUndefined()
+  expect(wrapper.find("[data-scroll-to-bottom]").exists()).toBe(true)
+  expect(input.element.value).toBe("Draft stays untouched")
+  expect(api.send).not.toHaveBeenCalled()
+
+  // Clicking a quote targeting the second duplicate jumps specifically to orig-2, never orig-1.
+  await wrapper.get('[data-super-message="reply-to-2"] [data-reply-quote="orig-2"] button[data-reply-quote-target]').trigger("click")
+  await flushPromises()
+  expect(scroll).toHaveBeenCalledTimes(2)
+  expect(scroll.mock.contexts[1]).toBe(orig2.element)
+  expect(orig2.attributes("data-conversation-located")).toBe("true")
+  expect(orig1.attributes("data-conversation-located")).toBeUndefined()
+
+  // Assistant sent messages with replyTo also locate their exact quoted original.
+  await wrapper.get('[data-super-message="assistant-reply"] [data-reply-quote="orig-1"] button[data-reply-quote-target]').trigger("click")
+  await flushPromises()
+  expect(scroll).toHaveBeenCalledTimes(3)
+  expect(scroll.mock.contexts[2]).toBe(orig1.element)
+  expect(orig1.attributes("data-conversation-located")).toBe("true")
+
+  await vi.advanceTimersByTimeAsync(2000)
+  await flushPromises()
+  expect(wrapper.find("[data-conversation-located]").exists()).toBe(false)
+})
+
+test("unavailable quoted originals render non-interactive and never mis-jump to messages with matching text", async () => {
+  const sharedText = "完全相同的消息正文"
+  const initial = room({
+    supportsReplyFeedback: true,
+    messages: [
+      message("surviving-dup", { role: "assistant", text: sharedText }),
+      message("ephemeral-orig", { role: "assistant", text: sharedText }),
+      message("reply-missing", { role: "user", text: "引用已丢失", replyTo: "deleted-id", state: "answered" }),
+      message("reply-orphan-fb", { role: "user", text: "引用孤立反馈", replyTo: "milestone:gone-req:1", state: "answered" }),
+      message("reply-ephemeral", { role: "user", text: "引用即将消失", replyTo: "ephemeral-orig", state: "answered" }),
+    ],
+    feedback: {
+      cursor: 1,
+      previewGeneration: "gen-orphan",
+      items: [{
+        itemId: "milestone:gone-req:1",
+        kind: "milestone",
+        sourceMessageId: "gone-req",
+        revision: 0,
+        text: sharedText,
+        status: "completed",
+        seq: 1,
+        createdAt: "now",
+        updatedAt: "now",
+      }],
+      processes: [],
+    },
+  })
+  const poll = await setupProgress(initial)
+  const viewport = scrollViewport()
+  viewport.element.scrollTop = 410
+  await viewport.trigger("scroll")
+  const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
+
+  // 1. Deleted/missing target ID: shows unavailable indicator, non-clickable, never jumps to surviving-dup.
+  const missingQuote = wrapper.get('[data-super-message="reply-missing"] blockquote[data-reply-quote="deleted-id"]')
+  expect(missingQuote.attributes("data-reply-quote-state")).toBe("unavailable")
+  expect(missingQuote.text()).toBe(i18n.global.t("superAgent.quotedMessageUnavailable"))
+  expect(missingQuote.find("button").exists()).toBe(false)
+  await missingQuote.trigger("click")
+  await flushPromises()
+  expect(scroll).not.toHaveBeenCalled()
+  expect(viewport.element.scrollTop).toBe(410)
+  expect(wrapper.find("[data-conversation-located]").exists()).toBe(false)
+
+  // 2. Orphan feedback item whose text matches surviving-dup: shows text, non-clickable, never jumps to surviving-dup.
+  const orphanQuote = wrapper.get('[data-super-message="reply-orphan-fb"] blockquote[data-reply-quote="milestone:gone-req:1"]')
+  expect(orphanQuote.attributes("data-reply-quote-state")).toBe("unavailable")
+  expect(orphanQuote.text()).toBe(sharedText)
+  expect(orphanQuote.find("button").exists()).toBe(false)
+  await orphanQuote.trigger("click")
+  await flushPromises()
+  expect(scroll).not.toHaveBeenCalled()
+  expect(viewport.element.scrollTop).toBe(410)
+  expect(wrapper.find("[data-conversation-located]").exists()).toBe(false)
+
+  // 3. Initially locatable quote becomes unavailable after snapshot update: turns non-clickable and never jumps to surviving-dup.
+  expect(wrapper.find('[data-super-message="reply-ephemeral"] button[data-reply-quote-target]').exists()).toBe(true)
+  await poll({
+    ...initial,
+    messages: initial.messages.filter(item => item.id !== "ephemeral-orig"),
+  })
+  const staleQuote = wrapper.get('[data-super-message="reply-ephemeral"] blockquote[data-reply-quote="ephemeral-orig"]')
+  expect(staleQuote.attributes("data-reply-quote-state")).toBe("unavailable")
+  expect(staleQuote.find("button").exists()).toBe(false)
+  await staleQuote.trigger("click")
+  await flushPromises()
+  expect(scroll).not.toHaveBeenCalled()
+  expect(viewport.element.scrollTop).toBe(410)
+  expect(wrapper.find("[data-conversation-located]").exists()).toBe(false)
+})
+
+test("clicking a quote targeting a collapsed approval receipt or split-job marker locates its exact target", async () => {
+  const owner = { sessionId: "worker-1", ticketId: "verify" }
+  const one = ticket("one"), two = ticket("two")
+  await setup(room({
+    tickets: [ticket("verify"), one, two],
+    messages: [
+      message("ask-approval", { ...owner, turnId: "turn-1" }),
+      message("req-0", { ...owner, role: "worker", workerEvent: "permission", text: "run tests" }),
+      message("req-1", { ...owner, role: "worker", workerEvent: "permission", text: "run tests" }),
+      message("done-approval", { ...owner, role: "worker", workerEvent: "result", sourceMessageId: "ask-approval", turnId: "turn-1" }),
+      message("reply-approval", { role: "user", text: "核对第二条授权", replyTo: "req-1", state: "answered" }),
+      message("ask-split", { state: "assigned", text: "拆分任务" }),
+      message("disp-a", { role: "assistant", kind: "dispatch", sourceMessageId: "ask-split", ticketId: one.id, text: "one" }),
+      message("disp-b", { role: "assistant", kind: "dispatch", sourceMessageId: "ask-split", ticketId: two.id, text: "two" }),
+      message("other-two", { role: "assistant", text: "two" }),
+      message("reply-split-job", { role: "user", text: "继续 two", replyTo: "disp-b", state: "answered" }),
+    ],
+  }), "team")
+
+  const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
+  const groupButton = wrapper.get('[data-approval-history="req-0"] button')
+  expect(groupButton.attributes("aria-expanded")).toBe("false")
+  expect(wrapper.find('[data-super-message="req-1"]').exists()).toBe(false)
+
+  await wrapper.get('[data-super-message="reply-approval"] button[data-reply-quote-target]').trigger("click")
+  await flushPromises()
+  expect(groupButton.attributes("aria-expanded")).toBe("true")
+  const secondReceipt = wrapper.get('[data-super-message="req-1"]')
+  expect(scroll.mock.contexts[0]).toBe(secondReceipt.element)
+  expect(secondReceipt.attributes("data-conversation-located")).toBe("true")
+  expect(wrapper.get('[data-super-message="req-0"]').attributes("data-conversation-located")).toBeUndefined()
+
+  await wrapper.get('[data-super-message="reply-split-job"] button[data-reply-quote-target]').trigger("click")
+  await flushPromises()
+  const splitRow = wrapper.get('[data-super-message="ask-split"]')
+  expect(scroll.mock.contexts[1]).toBe(splitRow.element)
+  expect(splitRow.attributes("data-conversation-located")).toBe("true")
+  expect(wrapper.get('[data-super-message="other-two"]').attributes("data-conversation-located")).toBeUndefined()
+})
+
+test.each([false, true])("clickable long quote preserves start-aligned single-line truncation and narrow column constraints (mobile=%s)", async ios => {
+  const longOriginal = "开头关键词：这是一段很长的中文引用正文，用于在窄窗口和桌面窗口下确认点击定位按钮仍然从开头显示并在末尾省略，同时不把消息列或视口撑宽越界。"
+  await setup(room({
+    messages: [
+      message("long-orig", { role: "assistant", text: longOriginal }),
+      message("long-reply", { role: "user", text: "沿用", replyTo: "long-orig", state: "answered" }),
+    ],
+  }), "team", ios)
+
+  const quote = wrapper.get('[data-super-message="long-reply"] blockquote')
+  const button = quote.get("button[data-reply-quote-target]")
+  const label = button.get("span")
+  expect(quote.classes()).toContain("max-w-full")
+  expect(quote.classes()).toContain("truncate")
+  expect(button.classes()).toContain("flex")
+  expect(button.classes()).toContain("min-w-0")
+  expect(button.classes()).toContain("max-w-full")
+  expect(button.classes()).toContain("text-left")
+  expect(label.classes()).toContain("min-w-0")
+  expect(label.classes()).toContain("truncate")
+  expect(label.text()).toBe(longOriginal)
+
+  const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
+  await button.trigger("click")
+  await flushPromises()
+  expect(scroll.mock.contexts[0]).toBe(wrapper.get('[data-super-message="long-orig"]').element)
 })

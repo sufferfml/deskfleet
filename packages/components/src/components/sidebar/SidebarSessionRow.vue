@@ -4,7 +4,7 @@ import { computed } from "vue"
 import { useI18n } from "vue-i18n"
 import type { RouteLocationRaw } from "vue-router"
 import { useSessionLabel } from "../../composables/useSessionLabel.ts"
-import { sessionIsUnread } from "../../services/agent-conversation.ts"
+import { sessionIsUnread, type SessionActivity } from "../../services/agent-conversation.ts"
 import { useAgentSessionsStore } from "../../stores/agent-sessions.ts"
 import type { AgentSessionSummary } from "../../stores/fleet-types.ts"
 import ProviderIcon from "../common/ProviderIcon.vue"
@@ -15,11 +15,23 @@ import SessionUnreadIndicator from "./SessionUnreadIndicator.vue"
 import SessionWorkingIndicator from "./SessionWorkingIndicator.vue"
 import TreeLink from "./TreeLink.vue"
 
-const props = defineProps<{ machineId: string; session: AgentSessionSummary; online: boolean; projectWorker?: boolean; depth: 0 | 1; to: RouteLocationRaw }>()
+const props = defineProps<{
+  machineId: string
+  session: AgentSessionSummary
+  online: boolean
+  projectWorker?: boolean
+  depth: 0 | 1
+  to: RouteLocationRaw
+  unreadOverride?: boolean
+  workingOverride?: SessionActivity | "archiving" | false
+}>()
 const { t } = useI18n()
 const sessionLabel = useSessionLabel()
 const agents = useAgentSessionsStore()
-const indicator = computed(() => props.session.archiveState === "archiving" ? "archiving" : agents.isWorking(props.session.id))
+const indicator = computed(() => props.workingOverride !== undefined
+  ? props.workingOverride
+  : (props.session.archiveState === "archiving" ? "archiving" : agents.isWorking(props.session.id)))
+const unread = computed(() => props.unreadOverride !== undefined ? props.unreadOverride : sessionIsUnread(props.session))
 </script>
 
 <template>
@@ -39,7 +51,7 @@ const indicator = computed(() => props.session.archiveState === "archiving" ? "a
       <template #trailing>
         <SessionPullRequestIndicators :machine-id="machineId" :session-id="session.id" />
         <SessionWorkingIndicator v-if="indicator" :state="indicator" />
-        <SessionUnreadIndicator v-else-if="sessionIsUnread(session)" />
+        <SessionUnreadIndicator v-else-if="unread" />
       </template>
       <template v-if="session.archiveState === 'active' || session.archiveState === 'archiving'" #actions>
         <UiButton

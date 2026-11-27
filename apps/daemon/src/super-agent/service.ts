@@ -2,7 +2,7 @@ import { organizeHistory, projectWorkers } from "./history.ts"
 import type { CatalogSnapshot } from "@deskfleet/native"
 import type { SuperHistory } from "@deskfleet/protocol/super-agent"
 import { effectiveCoordinatorProfile, validateCoordinatorProfile } from "./profiles.ts"
-import { attachmentInfo, previewSuperAttachments, superAttachments, type SuperAttachmentStore } from "./attachments.ts"
+import { assertAttachmentBudget, attachmentInfo, previewSuperAttachments, superAttachments, type SuperAttachment, type SuperAttachmentStore } from "./attachments.ts"
 import { aborted, isDeepStrictEqual } from "node:util"
 import { composerSkillText } from "@deskfleet/protocol/composer-reference"
 import { selectedReferences, selectedSkills, workspaceMentions, workspaceReferenceEvidence } from "./mentions.ts"
@@ -14,13 +14,15 @@ import type { AgentActor, AgentReceipt, AgentSessionRecord } from "@deskfleet/pr
 import type { AgentConfiguration } from "@deskfleet/protocol/agent-configuration"
 import { createSuperEvidence, superHistoryExcerpt } from "./evidence.ts"
 import { allowsStoppedResume, attachedKeys, frontendContext, quotedAttachmentSource, stoppedTicketContinuationError, ticketOfQuote, routeSuperMessage, type SuperDecisionModel, type SuperRouteResult } from "./router.ts"
-import { superRequestObject as object, superResourceId as identifier, parseSuperCommandTarget as commandTarget, superMessageText as text, superWorkerCommandName, superWorkerCommandTarget, type SuperCoordinatorOptions, type SuperCoordinatorPhase, type SuperHistorySource, type SuperSend, type SuperSnapshot, type SuperWorkerRequest, type SuperWorkspaceId } from "@deskfleet/protocol/super-agent"
-import { dispatchRecovery, emptyState, errorText, missingCoordinatorProvider, missingWorkerProvider, note, publicRoom, roomFor, superTaskText, userFocus, type DispatchIntent, type SuperRoom, type SuperStateStore, type SuperUserState } from "./state.ts"
+import { computeSaWorkspaceSummary, isConfirmedStoppedTurn, isValidAccentSlot, mergeSaMarkerRef, parseSuperCreateTicket, parseSuperLinkMessage, parseSuperMarkRead, parseSuperReusedAttachments, superRequestObject as object, superResourceId as identifier, parseSuperCommandTarget as commandTarget, superMessageText as text, superWorkerCommandName, superWorkerCommandTarget, type SuperCoordinatorOptions, type SuperCoordinatorPhase, type SuperHistorySource, type SuperMachineSummary, type SuperSend, type SuperSnapshot, type SuperWorkerRequest, type SuperWorkspaceId, type SuperWorkspaceSummary } from "@deskfleet/protocol/super-agent"
+import { bumpVisibleSeq, dispatchRecovery, emptyState, errorText, missingCoordinatorProvider, missingWorkerProvider, note, publicRoom, roomFor, STOP_UNCONFIRMED_MS, superTaskText, userFocus, visibleStopState, type DispatchIntent, type StoredSuperTicket, type SuperRoom, type SuperStateStore, type SuperUserState } from "./state.ts"
 import { adhdCommand } from "@deskfleet/protocol/adhd-command"
 import { activeTurn, deliverSuperIntent, ownedPendingRequests, projectSuperEvents, resolveWorkingIntentInputs, syncTicketSnapshotStatus, type SuperEventProjectionFeedback, type SuperWorkers } from "./worker.ts"
 import { routeWorkerCommand, sameCommandTarget } from "./command.ts"
 import { observeWorkerInputs, requestWorkspaceStop, stopWorkspaceDispatch, withdrawDispatch } from "./stop.ts"
 import { leaveArchivedTicket, roomWithArchives, ticketLifecycle } from "./archive.ts"
+import { allocateTicketAccent, backfillRoomTicketAccents, recordRoomRecentTicketAccent, releaseTicketAccentOccupancy, restoreTicketAccentOccupancy, roomNeedsTicketAccentBackfill, syncRoomAccentOccupancy } from "./accent.ts"
+import { appendMessageTicketLinks, expandEditableMessageGroup, isFoldedOperationMessage, resolveCreateDiscussionLinks, resolveRoomMessageLinks, setMessageTicketLinks } from "./message-links.ts"
 import { archivedTicketError, type FollowUpAuthReceipt, type FollowUpRunsPage, type FollowUpSourceRecord, type FollowUpSourcesResponse, type SuperFeedbackItem, type SuperFeedbackProcessResult, type SuperFeedbackPush, type SuperFeedbackSubscribeResult, type SuperWorkerReportReceipt } from "@deskfleet/protocol/super-agent"
 import { parseFollowUpAuthMutation, parseFollowUpSourceUpdate, type FollowUpAuthMutation, type FollowUpAuthSummary, type FollowUpSourceKind, type FollowUpSourceUpdateRequest } from "@deskfleet/protocol/super-agent-follow-up"
 export interface SuperFollowUpHost {
@@ -61,6 +63,8 @@ interface Dependencies {
   route?: typeof routeSuperMessage
   /** Feature/rollback toggle for real-time main-conversation feedback; defaults to enabled unless DESKFLEET_DISABLE_REPLY_FEEDBACK=1. */
   enableReplyFeedback?: boolean
+  /** Override stop confirmation timeout before emitting snapshot_dirty for unconfirmed stops (default 15s). */
+  stopUnconfirmedMs?: number
 }
 
 interface ActiveRoute {
@@ -92,6 +96,7 @@ export class SuperAgentService {
   readonly #failedReplays = new Set<string>()
   readonly #stop = new AbortController()
   readonly #routes = new Map<string, ActiveRoute>()
+  readonly #stopTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #feedback = new SuperFeedbackHub()
   readonly #attribution = new WorkerFeedbackAttribution()
   #unsubscribe?: () => void
@@ -102,6 +107,96 @@ export class SuperAgentService {
     return this.#deps.enableReplyFeedback ?? process.env.DESKFLEET_DISABLE_REPLY_FEEDBACK !== "1"
   }
   feedbackMetrics() { return this.#feedback.metrics() }
+  notifySnapshotDirty(userId: string, workspaceId: SuperWorkspaceId, sourceMessageId?: string) {
+    this.#feedback.notifySnapshotDirty(userId, workspaceId, sourceMessageId)
+  }
+  #stopUnconfirmedMs(): number {
+    return this.#deps.stopUnconfirmedMs ?? STOP_UNCONFIRMED_MS
+  }
+  #clearStopTimers(uid: string, intentId: string) {
+    const prefix = JSON.stringify([uid, intentId]).slice(0, -1) + ","
+    for (const [key, timer] of this.#stopTimers) {
+      if (key.startsWith(prefix)) {
+        clearTimeout(timer)
+        this.#stopTimers.delete(key)
+      }
+    }
+  }
+  #scheduleStopTimeout(uid: string, intent: DispatchIntent) {
+    if (this.#stop.signal.aborted || !intent.stop || intent.stop.state !== "stopping") return
+    const timeoutMs = this.#stopUnconfirmedMs()
+    const timerKey = JSON.stringify([uid, intent.id, intent.stop.cancelId])
+    if (this.#stopTimers.has(timerKey)) return
+    const remaining = Math.max(0, intent.stop.requestedAt + timeoutMs + 1 - Date.now())
+    const timer = setTimeout(() => {
+      this.#stopTimers.delete(timerKey)
+      if (this.#stop.signal.aborted) return
+      const live = this.#deps.store.get(uid)?.intents.find(item => item.id === intent.id)
+      if (!live?.stop || live.stop.cancelId !== intent.stop!.cancelId) return
+      if (visibleStopState(live.stop, timeoutMs) === "unconfirmed") {
+        this.#feedback.notifySnapshotDirty(uid, live.roomId, live.messageId)
+      }
+    }, remaining)
+    timer.unref()
+    this.#stopTimers.set(timerKey, timer)
+  }
+  #extraDelegatedCompletedSeqs(room: SuperRoom): Record<string, string> {
+    const seqs: Record<string, string> = {}
+    for (const ticket of room.tickets) {
+      if (!ticket.sessionId || !ticket.lastDeliveredSeq) continue
+      const existing = seqs[ticket.sessionId]
+      try {
+        if (!existing || BigInt(ticket.lastDeliveredSeq) > BigInt(existing)) seqs[ticket.sessionId] = ticket.lastDeliveredSeq
+      } catch {
+        seqs[ticket.sessionId] = ticket.lastDeliveredSeq
+      }
+    }
+    return seqs
+  }
+  #workspacePendingRequests(uid: string, workspaceId: SuperWorkspaceId, room: SuperRoom) {
+    const requests = room.tickets.flatMap(ticket => {
+      const pending = !ticket.archiveState && ticket.sessionId && this.#pendingRequests.get(JSON.stringify([uid, ticket.sessionId]))
+      return pending && pending.ticketId === ticket.id ? pending.requests.map(request => ({ ...request, ticketId: ticket.id })) : []
+    })
+    if (this.#deps.followUp) {
+      const seen = new Set(requests.map(r => JSON.stringify([r.item.sessionId, r.kind, r.item.id])))
+      for (const extra of this.#deps.followUp.pendingRequestsForWorkspace(uid, workspaceId)) {
+        const key = JSON.stringify([extra.item.sessionId, extra.kind, extra.item.id])
+        if (!seen.has(key)) { seen.add(key); requests.push(extra) }
+      }
+    }
+    return requests
+  }
+  #workspaceSummary(uid: string, workspaceId: SuperWorkspaceId, state: SuperUserState | undefined): SuperWorkspaceSummary {
+    const room = roomWithArchives(state?.rooms.find(item => item.workspaceId === workspaceId) ?? roomFor(emptyState(), workspaceId), this.#workerSessions)
+    const intents = state?.intents ?? []
+    const pub = publicRoom(room, undefined, "", intents, undefined, this.#stopUnconfirmedMs())
+    const pendingRequests = this.#workspacePendingRequests(uid, workspaceId, room)
+    const activeIntents = intents.filter(intent => intent.roomId === workspaceId && intent.phase !== "withdrawn")
+    return computeSaWorkspaceSummary({
+      workspaceId,
+      messages: pub.messages,
+      tickets: pub.tickets,
+      pendingRequests,
+      lastRead: room.lastRead,
+      readErrorKeys: room.readErrorKeys,
+      activeIntents,
+      extraDelegatedCompletedSeqs: this.#extraDelegatedCompletedSeqs(room),
+    })
+  }
+  async #summary(uid: string): Promise<SuperMachineSummary> {
+    const state = this.#deps.store.get(uid)
+    const visibleWorkspaces = await this.#deps.workspaces(uid)
+    const allWorkspaces = await this.#deps.workspaces(uid, true)
+    const visibleIds = new Set(visibleWorkspaces.map(w => w.id))
+    const privateWorkspaceId = allWorkspaces.find(w => !visibleIds.has(w.id))?.id
+    const workspaceIds: SuperWorkspaceId[] = [null, ...visibleWorkspaces.map(w => w.id)]
+    return {
+      workspaces: workspaceIds.map(wid => this.#workspaceSummary(uid, wid, state)),
+      ...(privateWorkspaceId ? { privateWorkspaceId } : {}),
+      generatedAt: new Date().toISOString(),
+    }
+  }
   isSaWorkerSession(sessionId: string, creationOperationId?: string): boolean {
     if (this.#watchers.has(sessionId)) return true
     for (const uid of this.#deps.store.users()) {
@@ -147,24 +242,31 @@ export class SuperAgentService {
     return configured.find(p => p.id === room.provider)?.id || configured[0]?.id || ""
   }
   async #snapshot(uid: string, workspaceId: SuperWorkspaceId) {
-    const state = this.#deps.store.get(uid)
+    let state = this.#deps.store.get(uid)
+    const storedRoom = state?.rooms.find(item => item.workspaceId === workspaceId)
+    if (storedRoom && roomNeedsTicketAccentBackfill(storedRoom)) {
+      await this.#transaction(uid, saved => {
+        const target = saved.rooms.find(item => item.workspaceId === workspaceId)
+        if (target) backfillRoomTicketAccents(target, this.#workerSessions)
+      })
+      state = this.#deps.store.get(uid)
+    }
     const room = roomWithArchives(state?.rooms.find(item => item.workspaceId === workspaceId) ?? roomFor(emptyState(), workspaceId), this.#workerSessions)
     const providers = this.#deps.providers()
     const coordinator = this.#coordinator(state, providers)
     const snapshot = publicRoom(room, coordinator?.id, this.#defaultProvider(room), state?.intents ?? [], message => {
       const route = this.#routes.get(JSON.stringify([uid, message.id]))
       return route && route.revision === message.revision ? route.phase : undefined
-    })
-    snapshot.pendingRequests = room.tickets.flatMap(ticket => {
-      const pending = !ticket.archiveState && ticket.sessionId && this.#pendingRequests.get(JSON.stringify([uid, ticket.sessionId]))
-      return pending && pending.ticketId === ticket.id ? pending.requests.map(request => ({ ...request, ticketId: ticket.id })) : []
-    })
+    }, this.#stopUnconfirmedMs())
+    snapshot.pendingRequests = this.#workspacePendingRequests(uid, workspaceId, room)
+    const delegatedCompletedSeqs = computeSaWorkspaceSummary({
+      workspaceId,
+      messages: snapshot.messages,
+      tickets: snapshot.tickets,
+      extraDelegatedCompletedSeqs: this.#extraDelegatedCompletedSeqs(room),
+    }).delegatedCompletedSeqs
+    if (Object.keys(delegatedCompletedSeqs).length) snapshot.delegatedCompletedSeqs = delegatedCompletedSeqs
     if (this.#deps.followUp) {
-      const seen = new Set(snapshot.pendingRequests.map(r => JSON.stringify([r.item.sessionId, r.kind, r.item.id])))
-      for (const extra of this.#deps.followUp.pendingRequestsForWorkspace(uid, workspaceId)) {
-        const key = JSON.stringify([extra.item.sessionId, extra.kind, extra.item.id])
-        if (!seen.has(key)) { seen.add(key); snapshot.pendingRequests.push(extra) }
-      }
       snapshot.followUp = this.#deps.followUp.authSummary(uid, workspaceId)
       if (workspaceId !== null) {
         try {
@@ -188,7 +290,9 @@ export class SuperAgentService {
     snapshot.supportsWorkerCommands = true
     snapshot.supportsAdhdSkill = true
     snapshot.supportsStop = true
+    snapshot.supportsStoppedReEdit = true
     snapshot.supportsTicketArchive = true
+    snapshot.supportsTicketLinks = true
     snapshot.supportsComposerMentions = true
     if (this.feedbackEnabled) {
       snapshot.supportsReplyFeedback = true
@@ -259,10 +363,31 @@ export class SuperAgentService {
         this.#workerSessions.set(session.id, session)
         if (session.archiveState !== "active" && previous?.archiveState === "active") {
           for (const uid of this.#watchers.get(session.id) ?? []) this.#track(this.#transaction(uid, state => {
+            const changedRooms: SuperWorkspaceId[] = []
             for (const room of state.rooms) {
               const ticket = room.tickets.find(item => item.sessionId === session.id)
-              if (ticket) leaveArchivedTicket(state, room, ticket.id)
+              if (ticket) {
+                leaveArchivedTicket(state, room, ticket.id)
+                releaseTicketAccentOccupancy(room, ticket)
+                changedRooms.push(room.workspaceId)
+              }
             }
+            return changedRooms
+          }).then(changedRooms => {
+            for (const wid of changedRooms) this.#feedback.notifySnapshotDirty(uid, wid)
+          }))
+        } else if (session.archiveState === "active" && previous && previous.archiveState !== "active") {
+          for (const uid of this.#watchers.get(session.id) ?? []) this.#track(this.#transaction(uid, state => {
+            const changedRooms: SuperWorkspaceId[] = []
+            for (const room of state.rooms) {
+              const ticket = room.tickets.find(item => item.sessionId === session.id)
+              if (ticket && restoreTicketAccentOccupancy(room, ticket)) {
+                changedRooms.push(room.workspaceId)
+              }
+            }
+            return changedRooms
+          }).then(changedRooms => {
+            for (const wid of changedRooms) this.#feedback.notifySnapshotDirty(uid, wid)
           }))
         }
       }
@@ -279,14 +404,25 @@ export class SuperAgentService {
     for (const uid of this.#deps.store.users()) {
       let state = this.#deps.store.get(uid)
       if (!state) continue
-      // A Worker may have been archived from the regular UI while this front desk was offline.
+      // A Worker may have been archived or restored from the regular UI while this front desk was offline.
       const inactive = state.rooms.flatMap(room => room.tickets.filter(ticket => ticketLifecycle(ticket, this.#workerSessions).archiveState
         && (room.focusTicketId === ticket.id || room.pendingQuestion?.ticketId === ticket.id || room.recentTicketIds.includes(ticket.id)
           || state!.intents.some(intent => intent.ticketId === ticket.id && !intent.stop && (intent.phase === "planned" || intent.phase === "working"))))
         .map(ticket => ({ workspaceId: room.workspaceId, ticketId: ticket.id })))
-      if (inactive.length) {
+      const needsAccentSync = state.rooms.some(room =>
+        roomNeedsTicketAccentBackfill(room)
+        || room.tickets.some(ticket => {
+          if (!isValidAccentSlot(ticket.accentSlot)) return false
+          const archived = Boolean(ticketLifecycle(ticket, this.#workerSessions).archiveState)
+          return archived ? ticket.accentCounted !== false : ticket.accentCounted === false
+        }))
+      if (inactive.length || needsAccentSync) {
         await this.#transaction(uid, saved => {
           for (const { workspaceId, ticketId } of inactive) leaveArchivedTicket(saved, roomFor(saved, workspaceId), ticketId)
+          for (const room of saved.rooms) {
+            backfillRoomTicketAccents(room, this.#workerSessions)
+            syncRoomAccentOccupancy(room, this.#workerSessions)
+          }
         })
         state = this.#deps.store.get(uid)!
       }
@@ -299,6 +435,7 @@ export class SuperAgentService {
       }
       for (const intent of state.intents) {
         if (intent.stop) {
+          if (intent.stop.state === "stopping") this.#scheduleStopTimeout(uid, intent)
           if (intent.stop.state === "stopping" || intent.stop.state === "unconfirmed") this.#scheduleStop(uid, intent)
           continue
         }
@@ -308,10 +445,15 @@ export class SuperAgentService {
     }
   }
   async close() {
-    this.#stop.abort(); this.#unsubscribe?.(); this.#unsubscribePreview?.(); this.#feedback.close(); this.#attribution.clear()
+    this.#stop.abort()
+    for (const timer of this.#stopTimers.values()) clearTimeout(timer)
+    this.#stopTimers.clear()
+    this.#unsubscribe?.(); this.#unsubscribePreview?.(); this.#feedback.close(); this.#attribution.clear()
     while (this.#live.size) await Promise.allSettled([...this.#live])
   }
 
+  handle(method: "_deskfleet/super-agent/summary", value: unknown, actor: AgentActor): Promise<SuperMachineSummary>
+  handle(method: "_deskfleet/super-agent/markRead", value: unknown, actor: AgentActor): Promise<SuperWorkspaceSummary>
   handle(method: "_deskfleet/super-agent/history", value: unknown, actor: AgentActor): Promise<SuperHistory>
   handle(method: "_deskfleet/super-agent/followUpAuth", value: unknown, actor: AgentActor): Promise<FollowUpAuthReceipt>
   handle(method: "_deskfleet/super-agent/followUpSources", value: unknown, actor: AgentActor): Promise<FollowUpSourcesResponse>
@@ -319,9 +461,30 @@ export class SuperAgentService {
   handle(method: "_deskfleet/super-agent/followUpRuns", value: unknown, actor: AgentActor): Promise<FollowUpRunsPage>
   handle(method: "_deskfleet/super-agent/feedbackProcess", value: unknown, actor: AgentActor): Promise<SuperFeedbackProcessResult>
   handle(method: string, value: unknown, actor: AgentActor): Promise<SuperSnapshot>
-  async handle(method: string, value: unknown, actor: AgentActor): Promise<SuperSnapshot | SuperHistory | FollowUpAuthReceipt | FollowUpSourcesResponse | FollowUpSourceRecord | FollowUpRunsPage | SuperFeedbackProcessResult> {
+  async handle(method: string, value: unknown, actor: AgentActor): Promise<SuperSnapshot | SuperMachineSummary | SuperWorkspaceSummary | SuperHistory | FollowUpAuthReceipt | FollowUpSourcesResponse | FollowUpSourceRecord | FollowUpRunsPage | SuperFeedbackProcessResult> {
     if (this.#stop.signal.aborted) throw new Error("Workspace agent is stopping")
     if (actor.kind !== "user" || !actor.userId || !actor.deviceId) throw new Error("A verified user and device are required")
+    if (method === "_deskfleet/super-agent/summary") {
+      return this.#summary(actor.userId)
+    }
+    if (method === "_deskfleet/super-agent/markRead") {
+      const parsed = parseSuperMarkRead(value)
+      if (parsed.workspaceId !== null) knownWorkspace(await this.#deps.workspaces(actor.userId), parsed.workspaceId)
+      const uid = actor.userId
+      await this.#transaction(uid, state => {
+        const room = roomFor(state, parsed.workspaceId, this.#deps.providers()[0]?.id || "")
+        room.lastRead = mergeSaMarkerRef(room.lastRead, {
+          key: parsed.key,
+          order: parsed.order,
+          messageId: parsed.messageId,
+        })
+        if (parsed.errorKeys?.length) {
+          const merged = new Set([...(room.readErrorKeys ?? []), ...parsed.errorKeys])
+          room.readErrorKeys = [...merged].slice(-200)
+        }
+      })
+      return this.#workspaceSummary(uid, parsed.workspaceId, this.#deps.store.get(uid))
+    }
     if (method === "_deskfleet/super-agent/history") {
       const reqObj = object(value)
       const result = await organizeHistory(this.#deps, reqObj.assign === undefined ? actor : await this.#deps.authorize(actor), value)
@@ -465,6 +628,7 @@ export class SuperAgentService {
         }
         if (autoApprove !== undefined) room.workerAutoApprove = autoApprove
       })
+      this.#feedback.notifySnapshotDirty(uid, workspaceId)
     } else if (method === "_deskfleet/super-agent/archiveTicket") {
       const ticketId = identifier(arg.ticketId)
       const sessionId = arg.sessionId === null ? undefined : identifier(arg.sessionId)
@@ -484,6 +648,19 @@ export class SuperAgentService {
         const { session } = await workers.journal.read(sessionId)
         if (session.workspaceId !== ticket.executionWorkspaceId) throw new Error("Worker is outside the ticket workspace")
         await workers.handle(archived ? "_deskfleet/session/archive" : "_deskfleet/session/restore", { sessionId, operationId }, authority)
+        const refreshed = await workers.journal.read(sessionId).catch(() => undefined)
+        if (refreshed) this.#workerSessions.set(sessionId, refreshed.session)
+        await this.#transaction(uid, state => {
+          const room = roomFor(state, workspaceId)
+          const liveTicket = room.tickets.find(item => item.id === ticketId)
+          if (!liveTicket) return
+          if (archived) {
+            leaveArchivedTicket(state, room, ticketId)
+            releaseTicketAccentOccupancy(room, liveTicket)
+          } else {
+            restoreTicketAccentOccupancy(room, liveTicket)
+          }
+        })
       } else await this.#transaction(uid, state => {
         const room = roomFor(state, workspaceId)
         const ticket = verifyTarget(room)
@@ -493,15 +670,43 @@ export class SuperAgentService {
           }
           ticket.archiveState = "archived"
           leaveArchivedTicket(state, room, ticketId)
-        } else delete ticket.archiveState
+          releaseTicketAccentOccupancy(room, ticket)
+        } else {
+          delete ticket.archiveState
+          restoreTicketAccentOccupancy(room, ticket)
+        }
       })
+      this.#feedback.notifySnapshotDirty(uid, workspaceId)
     } else if (method === "_deskfleet/super-agent/send") {
       if (arg.retry !== undefined && typeof arg.retry !== "boolean") throw new Error("Invalid retry option")
-      const blocks = superAttachments(arg.attachments)
+      const rawBlocks = superAttachments(arg.attachments)
+      const reusedAttachments = parseSuperReusedAttachments(arg.reusedAttachments)
+      const reEditOf = arg.reEditOf === undefined ? undefined : identifier(arg.reEditOf)
+      const messageId = identifier(arg.messageId)
+      if (reEditOf === messageId) throw new Error("Cannot re-edit the same message")
+      const store = this.#deps.attachments
+      const trustedPaths = new Set<string>()
+      const reusedBlocks: SuperAttachment[] = []
+      if (reusedAttachments?.length) {
+        if (!store) throw new Error("This machine does not support workspace attachments")
+        const existingRoom = this.#deps.store.get(uid)?.rooms.find(r => r.workspaceId === workspaceId)
+        for (const ref of reusedAttachments) {
+          const sourceMsg = existingRoom?.messages.find(item => item.role === "user" && item.id === ref.messageId)
+          if (!sourceMsg?.attachments?.[ref.index] || !sourceMsg.attachmentKeys?.length) {
+            throw new Error("Attachment unavailable in this conversation")
+          }
+          const resolved = await store.resolveReused(uid, sourceMsg.attachmentKeys, ref.index)
+          reusedBlocks.push(resolved.block)
+          if (resolved.trustedPath) trustedPaths.add(resolved.trustedPath)
+        }
+      }
+      const blocks: SuperAttachment[] = [...reusedBlocks, ...rawBlocks]
+      if (blocks.length) assertAttachmentBudget(blocks)
       const request: SuperSend = {
-        workspaceId, messageId: identifier(arg.messageId),
+        workspaceId, messageId,
         text: arg.text === "" && (blocks.length || arg.retry) ? "" : text(arg.text),
         replyTo: arg.replyTo === undefined ? undefined : identifier(arg.replyTo),
+        ...(reEditOf && { reEditOf }),
         command: commandTarget(arg.command),
         timeZone: validTimeZone(arg.timeZone),
       }
@@ -510,7 +715,6 @@ export class SuperAgentService {
       if (hasSkills && !request.command) throw new Error("Select a Worker provider for this skill.")
       if (request.command && !superWorkerCommandName(request.text) && !hasSkills) throw new Error("Enter a worker slash command or select a skill.")
       if (hasSkills) composerSkillText(request.text, request.mentions!, request.command!.provider)
-      const store = this.#deps.attachments
       const key = blocks.length && store ? store.key(request.messageId, blocks) : undefined
       if (blocks.length) {
         if (!store || !key) throw new Error("This machine does not support workspace attachments")
@@ -520,16 +724,22 @@ export class SuperAgentService {
         if (request.replyTo && !room?.messages.some(m => m.id === request.replyTo) && !room?.feedbackItems?.some(f => f.itemId === request.replyTo)) throw new Error("Quoted message is outside this workspace conversation")
         const accepted = room?.messages.find(m => m.id === request.messageId)
         if (arg.retry && !accepted) throw new Error("Unknown message to retry")
-        if (accepted && (accepted.attachmentKeys?.[0] !== key || accepted.text !== request.text || accepted.replyTo !== request.replyTo)) throw new Error("Message ID already used for a different request")
+        if (accepted && (accepted.attachmentKeys?.[0] !== key || accepted.text !== request.text || accepted.replyTo !== request.replyTo || accepted.reEditOf !== request.reEditOf)) throw new Error("Message ID already used for a different request")
+        if (!accepted && request.reEditOf) {
+          if (!room || !this.#isConfirmedStoppedTurn(room, existing?.intents ?? [], request.reEditOf)) {
+            throw new Error("Only a confirmed stopped request can be re-edited")
+          }
+        }
         await this.#deps.authorize(actor)
         const roots = workspaceId === null ? [] : knownWorkspace(await this.#deps.workspaces(uid), workspaceId).roots
-        await store.save(uid, key, blocks, roots)
+        await store.save(uid, key, blocks, roots, trustedPaths)
       }
       const accepted = await this.#transaction(uid, state => {
         const room = roomFor(state, workspaceId, this.#deps.providers()[0]?.id || "")
         const prior = room.messages.find(message => message.id === request.messageId)
         if (prior) {
           if (prior.role !== "user" || prior.text !== request.text || prior.replyTo !== request.replyTo ||
+            prior.reEditOf !== request.reEditOf ||
             ((!arg.retry || request.command) && !sameCommandTarget(prior.command, request.command)) ||
             ((!arg.retry || arg.mentions !== undefined) && !isDeepStrictEqual(prior.mentions, request.mentions)) ||
             ((!arg.retry || key !== undefined) && prior.attachmentKeys?.[0] !== key)) throw new Error("Message ID already used for a different request")
@@ -570,11 +780,14 @@ export class SuperAgentService {
         if (state.rooms.some(other => other !== room && other.messages.some(message => message.id === request.messageId))) {
           throw new Error("Message ID already used in a different workspace")
         }
+        if (request.reEditOf && !this.#isConfirmedStoppedTurn(room, state.intents, request.reEditOf)) {
+          throw new Error("Only a confirmed stopped request can be re-edited")
+        }
         if (request.replyTo && !room.messages.some(message => message.id === request.replyTo) && !room.feedbackItems?.some(item => item.itemId === request.replyTo)) throw new Error("Quoted message is outside this workspace conversation")
         this.#checkTicketTarget(room, ticketOfQuote(room, room.messages.find(item => item.id === request.replyTo), request.replyTo))
         if (request.command) {
           const baseRoom = roomWithArchives(room, this.#workerSessions)
-          const expected = superWorkerCommandTarget({ ...baseRoom, provider: this.#defaultProvider(room), ...(room.feedbackItems?.length ? { feedback: { cursor: 0, previewGeneration: "", items: room.feedbackItems, processes: [] } } : {}) }, request.replyTo)
+          const expected = superWorkerCommandTarget({ ...baseRoom, messageTicketLinks: resolveRoomMessageLinks(baseRoom), provider: this.#defaultProvider(room), ...(room.feedbackItems?.length ? { feedback: { cursor: 0, previewGeneration: "", items: room.feedbackItems, processes: [] } } : {}) }, request.replyTo)
           // Session configuration can already reflect a provider change made in the
           // Worker itself. The live registration and catalog are checked before dispatch.
           if (expected.sessionId) expected.provider = request.command.provider
@@ -583,19 +796,21 @@ export class SuperAgentService {
         const style = !request.command ? adhdCommand(request.text) : undefined
         if (style) room.adhdEnabled = style.enabled
         const styleOnly = !!style && !style.task && !key && !request.mentions?.length
-        note(room, request.text, { id: request.messageId, role: "user", state: styleOnly ? "answered" : "routing", replyTo: request.replyTo, actor, revision: 0,
+        note(room, request.text, { id: request.messageId, role: "user", state: styleOnly ? "answered" : "routing", replyTo: request.replyTo, ...(request.reEditOf && { reEditOf: request.reEditOf }), actor, revision: 0,
           ...((style || room.adhdEnabled) && { adhdEnabled: !!room.adhdEnabled }),
           ...(request.timeZone && { clientTimeZone: request.timeZone }),
           ...(request.command && { command: request.command }), ...(request.mentions && { mentions: request.mentions }),
           ...(key ? { attachmentKeys: [key], attachments: blocks.map(attachmentInfo) } : {}) })
         if (styleOnly) {
-          note(room, style.enabled ? "ADHD mode is on for this conversation." : "ADHD mode is off.", {
+          const reply = note(room, style.enabled ? "ADHD mode is on for this conversation." : "ADHD mode is off.", {
             sourceMessageId: request.messageId, adhdModeNotice: style.enabled ? "enabled" : "disabled",
           })
+          bumpVisibleSeq(room, reply)
           return false
         }
         return true
       })
+      this.#feedback.notifySnapshotDirty(uid, workspaceId, request.messageId)
       if (Array.isArray(accepted)) {
         for (const intent of accepted) this.#scheduleDispatch(uid, intent)
       } else if (accepted) this.#scheduleRoute(uid, workspaceId, request.messageId)
@@ -610,11 +825,59 @@ export class SuperAgentService {
       if (routeId) this.#routes.get(JSON.stringify([uid, routeId]))?.controller.abort()
       this.#feedback.abortRequestPreviews(uid, workspaceId, request.messageId, request.revision, request.ticketId)
       this.#feedback.notifySnapshotDirty(uid, workspaceId, request.messageId)
-      for (const intent of intents) this.#scheduleStop(uid, intent)
+      for (const intent of intents) {
+        if (intent.stop?.state === "stopping") this.#scheduleStopTimeout(uid, intent)
+        this.#scheduleStop(uid, intent)
+      }
     } else if (method === "_deskfleet/super-agent/correct") {
       const messageId = identifier(arg.messageId), ticketId = identifier(arg.ticketId)
       await this.#correct(uid, workspaceId, messageId, ticketId, actor)
+      this.#feedback.notifySnapshotDirty(uid, workspaceId, messageId)
       this.#scheduleRoute(uid, workspaceId, messageId)
+    } else if (method === "_deskfleet/super-agent/linkMessage") {
+      const parsed = parseSuperLinkMessage(value)
+      if (parsed.workspaceId !== workspaceId) throw new Error("Workspace mismatch")
+      await this.#transaction(uid, state => {
+        const room = roomFor(state, workspaceId, this.#deps.providers()[0]?.id || "")
+        const targetMessage = room.messages.find(item => item.id === parsed.messageId)
+        if (!targetMessage || isFoldedOperationMessage(room, targetMessage)) {
+          throw new Error("Unknown message in this workspace")
+        }
+        const currentLinks = resolveRoomMessageLinks(room)[parsed.messageId] ?? []
+        for (const tid of parsed.ticketIds) {
+          const ticket = room.tickets.find(item => item.id === tid)
+          if (!ticket) throw new Error("Unknown ticket in this workspace")
+          if (!currentLinks.includes(tid)) this.#checkTicketTarget(room, tid)
+        }
+        const groupIds = expandEditableMessageGroup(room, parsed.messageId)
+        setMessageTicketLinks(room, groupIds, parsed.ticketIds)
+      })
+      this.#feedback.notifySnapshotDirty(uid, workspaceId, parsed.messageId)
+    } else if (method === "_deskfleet/super-agent/createTicket") {
+      const parsed = parseSuperCreateTicket(value)
+      if (parsed.workspaceId !== workspaceId) throw new Error("Workspace mismatch")
+      await this.#transaction(uid, state => {
+        const room = roomFor(state, workspaceId, this.#deps.providers()[0]?.id || "")
+        const targetMessage = room.messages.find(item => item.id === parsed.messageId)
+        if (!targetMessage || isFoldedOperationMessage(room, targetMessage)) {
+          throw new Error("Unknown message in this workspace")
+        }
+        const defaultScope = superTaskText(targetMessage).trim().slice(0, 600) || parsed.title
+        const ticket: StoredSuperTicket = {
+          id: randomUUID(),
+          title: parsed.title,
+          scope: parsed.scope ?? defaultScope,
+          summary: "",
+          provider: this.#defaultProvider(room),
+          updatedAt: new Date().toISOString(),
+        }
+        allocateTicketAccent(room, ticket, this.#workerSessions)
+        room.tickets.push(ticket)
+        recordRoomRecentTicketAccent(room, ticket.id)
+        const groupIds = expandEditableMessageGroup(room, parsed.messageId)
+        appendMessageTicketLinks(room, groupIds, ticket.id)
+      })
+      this.#feedback.notifySnapshotDirty(uid, workspaceId, parsed.messageId)
     } else throw new Error("Unknown workspace agent operation")
     return this.#snapshot(uid, workspaceId)
   }
@@ -622,6 +885,20 @@ export class SuperAgentService {
   #checkTicketTarget(room: SuperRoom, id: string | undefined) {
     const ticket = id && room.tickets.find(item => item.id === id)
     if (ticket && ticketLifecycle(ticket, this.#workerSessions).archiveState) throw new Error(archivedTicketError)
+  }
+
+  #isConfirmedStoppedTurn(room: SuperRoom, intents: DispatchIntent[], sourceMessageId: string): boolean {
+    const relevantIntents = intents.filter(intent => intent.roomId === room.workspaceId && intent.messageId === sourceMessageId && intent.operation !== "stop")
+    for (const intent of relevantIntents) {
+      if (intent.stop) {
+        const stopState = visibleStopState(intent.stop, this.#stopUnconfirmedMs())
+        if (stopState === "stopping" || stopState === "unconfirmed" || stopState === "finished") return false
+      } else if (intent.phase === "planned" || intent.phase === "working" || intent.phase === "uncertain") {
+        return false
+      }
+    }
+    const pub = publicRoom(roomWithArchives(room, this.#workerSessions), undefined, "", intents, undefined, this.#stopUnconfirmedMs())
+    return isConfirmedStoppedTurn(pub.messages, pub.tickets, sourceMessageId)
   }
 
   async #correct(uid: string, id: SuperWorkspaceId, messageId: string, ticketId: string, actor: AgentActor) {
@@ -642,6 +919,7 @@ export class SuperAgentService {
       original.corrections ??= []
       original.corrections.push({ fromTicketId: original.correctedTicketId || original.ticketId, toTicketId: ticketId, actor, createdAt: new Date().toISOString() })
       original.ticketId = undefined; original.sessionId = undefined
+      if (room.messageLinks) delete room.messageLinks[original.id]
       original.correctedTicketId = ticketId; original.state = "routing"; original.reason = undefined
       original.revision = (original.revision || 0) + 1; original.actor = actor; original.retryable = undefined
     })
@@ -660,6 +938,7 @@ export class SuperAgentService {
       const signal = AbortSignal.any([this.#stop.signal, controller.signal])
       const historySources: SuperHistorySource[] = []
       let measurement: SuperRoom["coordinatorMeasurement"]
+      let routeFailed = false
       try {
         this.#checkTicketTarget(room, message.correctedTicketId ?? ticketOfQuote(room, room.messages.find(item => item.id === message.replyTo), message.replyTo))
         const actor = await this.#deps.authorize(message.actor)
@@ -867,18 +1146,23 @@ export class SuperAgentService {
         await this.#apply(uid, room.workspaceId, messageId, revision, decision, actor, workspaces, providers, legacy, turnIds, historySources, measurement, undefined, scheduleResults)
       } catch (error) {
         if (signal.aborted) return
-        await this.#transaction(uid, state => {
+        routeFailed = await this.#transaction(uid, state => {
           const failedRoom = roomFor(state, workspaceId)
           const current = failedRoom.messages.find(item => item.id === messageId)
-          if (current?.state !== "routing" || current.revision !== revision) return
+          if (current?.state !== "routing" || current.revision !== revision) return false
           if (measurement) failedRoom.coordinatorMeasurement = measurement
           current.state = "failed"
           current.reason = errorText(error)
           current.retryable = true
           if (historySources.length) current.historySources = historySources
           if (error instanceof HistoricalSessionUnavailable) current.sessionId = error.sessionId
+          bumpVisibleSeq(failedRoom, current)
+          return true
         })
-      } finally { this.#routes.delete(key) }
+      } finally {
+        this.#routes.delete(key)
+        if (routeFailed) this.#feedback.notifySnapshotDirty(uid, workspaceId, messageId)
+      }
     })
   }
 
@@ -907,16 +1191,18 @@ export class SuperAgentService {
             const id = randomUUID()
             note(destination, superTaskText(source), { id, role: "user", ...((source.adhdEnabled || destination.adhdEnabled) && { adhdEnabled: true }), sourceMessageId: source.id, sourceWorkspaceId: workspaceId, actor, revision: 0, state: "routing", ...(source.clientTimeZone ? { clientTimeZone: source.clientTimeZone } : {}) })
             source.targetWorkspaceId = target.id; source.state = "transferred"; source.reason = decision.reason
-            note(room, outcome.text, { sourceMessageId: source.id, targetWorkspaceId: target.id })
+            const handoffNotice = note(room, outcome.text, { sourceMessageId: source.id, targetWorkspaceId: target.id })
+            bumpVisibleSeq(room, handoffNotice)
             schedule.handoff = { workspaceId: target.id, messageId: id }
             return schedule
           }
-          note(room, outcome.text, {
+          const schedNote = note(room, outcome.text, {
             sourceMessageId: source.id,
             sessionId: outcome.provenance?.sessionId,
             provenance: outcome.provenance,
             ...(outcome.clarifyOptions?.length ? { options: outcome.clarifyOptions } : {}),
           })
+          bumpVisibleSeq(room, schedNote)
           continue
         }
         if (action.kind === "handoff") {
@@ -936,7 +1222,8 @@ export class SuperAgentService {
         if ("ticketId" in action && action.ticketId && !ticket) throw new Error("Coordinator selected an unknown Ticket")
         if (ticket) this.#checkTicketTarget(room, ticket.id)
         if (action.kind === "answer" || action.kind === "clarify") {
-          note(room, text(action.text), { ticketId: ticket?.id, sessionId: ticket?.sessionId, sourceMessageId: source.id, historySources: source.historySources, options: action.options })
+          const reply = note(room, text(action.text), { ticketId: ticket?.id, sessionId: ticket?.sessionId, sourceMessageId: source.id, historySources: source.historySources, options: action.options })
+          bumpVisibleSeq(room, reply)
           if (ticket) chosen.add(ticket.id)
           if (ticket && action.options?.length) question = { ticketId: ticket.id, options: [...action.options], optionDisposition: action.optionDisposition }
           continue
@@ -956,7 +1243,10 @@ export class SuperAgentService {
             provider, status: "queued", historySources: source.historySources, updatedAt: new Date().toISOString(), referenceTicketId: ticket?.id,
             sessionId: old?.id, executionWorkspaceId: old?.workspaceId, lastEventSeq: old?.lastEventSeq,
           }
+          allocateTicketAccent(room, ticket, this.#workerSessions)
           room.tickets.push(ticket)
+          const discussionIds = resolveCreateDiscussionLinks(room, source, action)
+          if (discussionIds.length) appendMessageTicketLinks(room, discussionIds, ticket.id)
         }
         if (!ticket) throw new Error("A worker action requires a ticket")
         if (source.command) {
@@ -1031,7 +1321,10 @@ export class SuperAgentService {
     })
     for (const item of next.feedbackItems) this.#feedback.upsertItem(uid, workspaceId, item)
     this.#feedback.notifySnapshotDirty(uid, workspaceId, messageId)
-    if (next.handoff) this.#scheduleRoute(uid, next.handoff.workspaceId, next.handoff.messageId)
+    if (next.handoff) {
+      this.#feedback.notifySnapshotDirty(uid, next.handoff.workspaceId, next.handoff.messageId)
+      this.#scheduleRoute(uid, next.handoff.workspaceId, next.handoff.messageId)
+    }
     for (const intent of next.intents) {
       if (intent.sessionId) this.#watch(uid, intent.sessionId)
       this.#scheduleDispatch(uid, intent)
@@ -1054,16 +1347,20 @@ export class SuperAgentService {
       (intent.operation === "stop" || !!receipt.inputId)
     const rejected = command.status === "failed" || command.status === "rejected" || input?.state === "failed" || input?.state === "withdrawn"
     if (!confirmed && !rejected) return
-    await this.#transaction(uid, state => {
+    const reconciled = await this.#transaction(uid, state => {
       const live = state.intents.find(item => item.id === intent.id)
-      if (live?.phase !== "uncertain") return
+      if (live?.phase !== "uncertain") return false
       const room = roomFor(state, intent.roomId)
       const ticket = room.tickets.find(item => item.id === intent.ticketId)
       const original = room.messages.find(item => item.id === intent.messageId)
       live.phase = rejected ? "failed" : "sent"
       live.error = rejected ? command.error || input?.error || "The original worker operation was rejected." : undefined
       live.inputId = input?.id || receipt?.inputId
-      if (original) { original.state = rejected ? "failed" : "assigned"; original.reason = live.error || "The worker journal confirmed receipt." }
+      if (original) {
+        original.state = rejected ? "failed" : "assigned"
+        original.reason = live.error || "The worker journal confirmed receipt."
+        if (rejected) bumpVisibleSeq(room, original)
+      }
       if (ticket && ticket.status === "blocked" && !rejected) {
         if (snapshot.turns.some(activeTurn)) ticket.status = "working"
         else if (snapshot.inputs.some(i => i.state === "pending" || i.state === "dispatching")) ticket.status = "queued"
@@ -1071,7 +1368,9 @@ export class SuperAgentService {
         if ([...snapshot.permissions, ...snapshot.elicitations].some(req => req.state === "pending")) ticket.status = "attention"
       }
       note(room, live.error || "The worker journal confirmed the original delivery.", { kind: "delivery", role:"worker", ticketId:intent.ticketId, sessionId:intent.sessionId, sourceMessageId:intent.messageId })
+      return true
     })
+    if (reconciled) this.#feedback.notifySnapshotDirty(uid, intent.roomId, intent.messageId)
   }
 
   #scheduleStop(uid: string, intent: DispatchIntent) {
@@ -1082,10 +1381,13 @@ export class SuperAgentService {
       const result = await projectWorkers(this.#deps, uid)
         .then(workers => stopWorkspaceDispatch(workers, live, this.#deps.authorize))
         .catch(() => ({ state: "unconfirmed" as const, snapshot: undefined, undelivered: false }))
-      if (result.state === live.stop.state && (!result.snapshot || !observeWorkerInputs([live], result.snapshot))) return
-      await this.#transaction(uid, state => {
+      if (result.state === live.stop.state && (!result.snapshot || !observeWorkerInputs([live], result.snapshot))) {
+        if (live.stop.state === "stopping") this.#scheduleStopTimeout(uid, live)
+        return
+      }
+      const outcome = await this.#transaction(uid, state => {
         const saved = state.intents.find(item => item.id === live.id)
-        if (!saved?.stop || saved.stop.cancelId !== live.stop!.cancelId) return
+        if (!saved?.stop || saved.stop.cancelId !== live.stop!.cancelId) return undefined
         saved.stop.state = result.state
         const room = roomFor(state, saved.roomId)
         const ticket = room.tickets.find(item => item.id === saved.ticketId)
@@ -1096,15 +1398,22 @@ export class SuperAgentService {
           ticket.executionWorkspaceId = saved.workspaceId
         }
         if (result.undelivered) withdrawDispatch(state, room, saved, result.snapshot)
-        if (!result.snapshot) return
-        observeWorkerInputs(state.intents, result.snapshot)
-        if (result.state === "stopped" && ticket?.status === "queued" && BigInt(ticket.lastEventSeq ?? "0") <= BigInt(result.snapshot.session.lastEventSeq) &&
-          !result.snapshot.turns.some(activeTurn) && !result.snapshot.inputs.some(i => i.state === "pending" || i.state === "dispatching") &&
-          !state.intents.some(i => i.ticketId === saved.ticketId && !i.stop && (i.phase === "planned" || i.phase === "working"))) {
-          ticket.status = "stopped"
-          if (room.pendingQuestion?.ticketId === ticket.id) room.pendingQuestion = undefined
+        if (result.snapshot) {
+          observeWorkerInputs(state.intents, result.snapshot)
+          if (result.state === "stopped" && ticket?.status === "queued" && BigInt(ticket.lastEventSeq ?? "0") <= BigInt(result.snapshot.session.lastEventSeq) &&
+            !result.snapshot.turns.some(activeTurn) && !result.snapshot.inputs.some(i => i.state === "pending" || i.state === "dispatching") &&
+            !state.intents.some(i => i.ticketId === saved.ticketId && !i.stop && (i.phase === "planned" || i.phase === "working"))) {
+            ticket.status = "stopped"
+            if (room.pendingQuestion?.ticketId === ticket.id) room.pendingQuestion = undefined
+          }
         }
+        return { roomId: saved.roomId, messageId: saved.messageId, stopState: saved.stop.state }
       })
+      if (outcome) {
+        if (outcome.stopState === "stopping") this.#scheduleStopTimeout(uid, live)
+        else this.#clearStopTimers(uid, live.id)
+        this.#feedback.notifySnapshotDirty(uid, outcome.roomId, outcome.messageId)
+      }
       if (!live.sessionId && result.snapshot) {
         this.#watch(uid, result.snapshot.session.id)
         this.#replay(uid, result.snapshot.session.id)
@@ -1119,25 +1428,31 @@ export class SuperAgentService {
         if (prior.ticketId === intent.ticketId && prior.phase === "uncertain") await this.#reconcile(uid, prior)
       }
       // The predecessor may have created this Ticket's Session after this intent was enqueued.
-      await this.#transaction(uid, state => {
+      const precheckDirty = await this.#transaction(uid, state => {
         const live = state.intents.find(i => i.id === intent.id)
-        const ticket = roomFor(state, intent.roomId).tickets.find(item => item.id === intent.ticketId)
-        if (!live || !ticket || live.phase !== "planned") return
+        const room = roomFor(state, intent.roomId)
+        const ticket = room.tickets.find(item => item.id === intent.ticketId)
+        if (!live || !ticket || live.phase !== "planned") return false
         if (ticketLifecycle(ticket, this.#workerSessions).archiveState) {
-          withdrawDispatch(state, roomFor(state, intent.roomId), live)
-          return
+          withdrawDispatch(state, room, live)
+          return true
         }
         const earlier = state.intents.slice(0, state.intents.indexOf(live)).find(i => i.ticketId === ticket.id && i.phase === "uncertain")
         if (earlier && live.operation !== "stop") {
           live.phase = "failed"; live.error = "A previous worker operation has no confirmed outcome. Inspect the original session before sending more work."
-          const source = roomFor(state, intent.roomId).messages.find(m => m.id === live.messageId)
-          if (source) { source.state = "failed"; source.reason = live.error }
+          const source = room.messages.find(m => m.id === live.messageId)
+          if (source) {
+            source.state = "failed"; source.reason = live.error
+            bumpVisibleSeq(room, source)
+          }
           ticket.status = "blocked"; ticket.summary = live.error
-          note(roomFor(state, intent.roomId), live.error, { kind: "delivery", role: "worker", ticketId: ticket.id, sourceMessageId: live.messageId })
-          return
+          note(room, live.error, { kind: "delivery", role: "worker", ticketId: ticket.id, sourceMessageId: live.messageId })
+          return true
         }
         if (!live.sessionId && ticket.sessionId) live.sessionId = ticket.sessionId
+        return false
       })
+      if (precheckDirty) this.#feedback.notifySnapshotDirty(uid, intent.roomId, intent.messageId)
       const workers = await projectWorkers(this.#deps, uid)
       await deliverSuperIntent({
         workers, current, authorize: this.#deps.authorize, suspended: () => this.#stop.signal.aborted,
@@ -1194,11 +1509,17 @@ export class SuperAgentService {
             }
             if (saved.phase === "failed" || saved.phase === "uncertain") {
               const original = room.messages.find(msg => msg.id === saved.messageId)
-              if (original) { original.state = saved.phase; original.reason = saved.error }
+              if (original) {
+                original.state = saved.phase; original.reason = saved.error
+                bumpVisibleSeq(room, original)
+              }
               ticket.status = "blocked"; ticket.summary = saved.error || "Dispatch failed"
               note(room, ticket.summary, { kind: "delivery", role: "worker", ticketId: ticket.id, sessionId: ticket.sessionId, sourceMessageId: saved.messageId })
             }
           })
+          if (patch.phase === "failed" || patch.phase === "uncertain" || patch.phase === "sent" || bound || patch.inputId) {
+            this.#feedback.notifySnapshotDirty(uid, intent.roomId, intent.messageId)
+          }
           if (bound) this.#watch(uid, bound.id)
           const reconciledSessionId = patch.sessionId ?? bound?.id ?? current()?.sessionId
           if (reconciledSessionId) this.#reconcileFeedback(reconciledSessionId, uid)
@@ -1229,12 +1550,17 @@ export class SuperAgentService {
           if (snapshot.session.workspaceId !== bound.executionWorkspaceId) { this.#pendingRequests.delete(key); return }
           this.#attribution.observeSnapshot(snapshot)
           const resolvedInputs = await resolveWorkingIntentInputs(state?.intents ?? [], sessionId, snapshot, this.#deps.agents.journal)
+          const prevPending = this.#pendingRequests.get(key)
           const requests = ownedPendingRequests(bound, snapshot, state?.intents ?? [])
-          if (requests.length && snapshot.session.archiveState === "active" && snapshot.session.lifecycle === "ready") {
-            this.#pendingRequests.set(key, { ticketId: bound.id, requests })
-          } else this.#pendingRequests.delete(key)
+          const nextPending = requests.length && snapshot.session.archiveState === "active" && snapshot.session.lifecycle === "ready"
+            ? { ticketId: bound.id, requests }
+            : undefined
+          const pendingChanged = !isDeepStrictEqual(prevPending, nextPending)
+          if (nextPending) this.#pendingRequests.set(key, nextPending)
+          else this.#pendingRequests.delete(key)
           let from = bound.lastEventSeq || "0"
           const through = BigInt(snapshot.session.lastEventSeq)
+          let notifiedInLoop = false
           while (!this.#stop.signal.aborted && BigInt(from) < through) {
             // Events can arrive between reading the snapshot and fetching its history.
             // Apply later events with their own snapshot so an older running turn cannot mask completion.
@@ -1258,6 +1584,7 @@ export class SuperAgentService {
               }
             })
             publishProjectedWorkerFeedback({ uid, workspaceId: room.workspaceId, room: this.#room(uid, room.workspaceId), projected: projectedFeedback, hub: this.#feedback })
+            notifiedInLoop = true
             from = page.at(-1)!.seq
           }
           // A fast turn can finish while the input receipt is still being committed.
@@ -1265,20 +1592,30 @@ export class SuperAgentService {
           const last = snapshot.turns.at(-1)
           const pending = snapshot.inputs.some(i => i.state === "pending" || i.state === "dispatching")
           const observed = this.#room(uid, room.workspaceId).tickets.find(t => t.id === bound.id)
+          let tailDirty = false
           if (last && !activeTurn(last) && !pending && observed?.status === "queued" && from === snapshot.session.lastEventSeq) {
-            await this.#transaction(uid, current => {
+            const settled = await this.#transaction(uid, current => {
               const r = roomFor(current, room.workspaceId)
               const t = r.tickets.find(t => t.id === bound.id)
-              if (!t || t.status !== "queued" || t.lastEventSeq !== from || current.intents.some(i => i.ticketId === t.id && (i.phase === "planned" || i.phase === "working"))) return
+              if (!t || t.status !== "queued" || t.lastEventSeq !== from || current.intents.some(i => i.ticketId === t.id && (i.phase === "planned" || i.phase === "working"))) return false
               if (r.messages.some(m => m.workerEvent === "result" && m.sessionId === sessionId && m.turnId === last.id)) {
                 t.status = last.state === "completed" ? undefined : last.state === "cancelled" ? "stopped" : "blocked"
                 if (t.status === "stopped" && r.pendingQuestion?.ticketId === t.id) r.pendingQuestion = undefined
+                return true
               }
+              return false
             })
+            if (settled) tailDirty = true
           }
           const intents = this.#deps.store.get(uid)?.intents ?? []
           // A fast steer can be delivered before the front desk checkpoints its input receipt.
-          if (observeWorkerInputs(intents, snapshot)) await this.#transaction(uid, current => observeWorkerInputs(current.intents, snapshot))
+          if (observeWorkerInputs(intents, snapshot)) {
+            const inputsChanged = await this.#transaction(uid, current => observeWorkerInputs(current.intents, snapshot))
+            if (inputsChanged) tailDirty = true
+          }
+          if (tailDirty || (pendingChanged && !notifiedInLoop)) {
+            this.#feedback.notifySnapshotDirty(uid, room.workspaceId)
+          }
           this.#reconcileFeedback(sessionId, uid)
           for (const intent of intents) {
             if (intent.sessionId === sessionId && (intent.stop?.state === "stopping" || intent.stop?.state === "unconfirmed")) this.#scheduleStop(uid, intent)

@@ -10,6 +10,7 @@ import type {
 } from "@deskfleet/protocol/super-agent"
 
 export interface LoadedRequestProcess {
+  sourceMessageId?: string
   revision: number
   items: SuperFeedbackItem[]
   hasMore: boolean
@@ -42,6 +43,7 @@ export interface FeedbackState {
   items: Map<string, SuperFeedbackItem>
   processes: Map<string, SuperFeedbackProcessIndex>
   loadedProcesses: Map<string, LoadedRequestProcess>
+  loadedProcessesByRevision?: Map<string, LoadedRequestProcess>
 }
 
 /** Generic placeholder that hosts emit for a tool whose update carries no title. */
@@ -55,6 +57,7 @@ export function createFeedbackState(workspaceId: SuperWorkspaceId): FeedbackStat
     items: new Map(),
     processes: new Map(),
     loadedProcesses: new Map(),
+    loadedProcessesByRevision: new Map(),
   }
 }
 
@@ -64,21 +67,61 @@ export function clearFeedbackState(state: FeedbackState): void {
   state.items.clear()
   state.processes.clear()
   state.loadedProcesses.clear()
+  state.loadedProcessesByRevision?.clear()
 }
 
-export function applySnapshotFeedback(state: FeedbackState, snapshot: SuperSnapshot): void {
+export function loadedProcessKey(sourceMessageId: string, revision: number): string {
+  return JSON.stringify([sourceMessageId, revision])
+}
+
+export function getLoadedProcess(
+  state: FeedbackState,
+  sourceMessageId: string,
+  revision: number,
+): LoadedRequestProcess | undefined {
+  const exact = state.loadedProcessesByRevision?.get(loadedProcessKey(sourceMessageId, revision))
+  if (exact) return exact
+  const legacy = state.loadedProcesses.get(sourceMessageId)
+  return legacy && legacy.revision === revision ? legacy : undefined
+}
+
+export function setLoadedProcess(
+  state: FeedbackState,
+  sourceMessageId: string,
+  revision: number,
+  value: Omit<LoadedRequestProcess, "sourceMessageId" | "revision">,
+): void {
+  const entry: LoadedRequestProcess = {
+    ...value,
+    sourceMessageId,
+    revision,
+  }
+  state.loadedProcessesByRevision ??= new Map()
+  state.loadedProcessesByRevision.set(loadedProcessKey(sourceMessageId, revision), entry)
+  const existing = state.loadedProcesses.get(sourceMessageId)
+  if (!existing || revision >= existing.revision) {
+    state.loadedProcesses.set(sourceMessageId, entry)
+  }
+}
+
+export function applySnapshotFeedback(
+  state: FeedbackState,
+  snapshot: SuperSnapshot,
+  options: { replace?: boolean } = {},
+): void {
   if (!snapshot.supportsReplyFeedback || !snapshot.feedback) {
     clearFeedbackState(state)
     return
   }
   const fb = snapshot.feedback
   const generationChanged = !!state.previewGeneration && state.previewGeneration !== fb.previewGeneration
+  const replacing = options.replace === true || generationChanged
   state.previewGeneration = fb.previewGeneration
-  state.cursor = generationChanged ? fb.cursor : Math.max(state.cursor, fb.cursor)
+  state.cursor = replacing ? fb.cursor : Math.max(state.cursor, fb.cursor)
   const nextItems = new Map<string, SuperFeedbackItem>()
   for (const item of fb.items) nextItems.set(item.itemId, { ...item })
   // Keep any in-flight live items from the same preview generation with a strictly newer cursor/offset.
-  if (!generationChanged) {
+  if (!replacing) {
     for (const [id, existing] of state.items) {
       const fromSnap = nextItems.get(id)
       if (!fromSnap && existing.seq > fb.cursor) nextItems.set(id, existing)
@@ -248,7 +291,7 @@ function mergeProcessPageItem(prior: SuperFeedbackItem | undefined, next: SuperF
 }
 
 export function mergeLoadedProcess(state: FeedbackState, result: SuperFeedbackProcessResult, append = false): void {
-  const prior = append ? state.loadedProcesses.get(result.sourceMessageId) : undefined
+  const prior = append ? getLoadedProcess(state, result.sourceMessageId, result.revision) : undefined
   const byId = new Map<string, SuperFeedbackItem>()
   if (prior && prior.revision === result.revision) {
     for (const item of prior.items) byId.set(item.itemId, item)
@@ -258,8 +301,7 @@ export function mergeLoadedProcess(state: FeedbackState, result: SuperFeedbackPr
     if (merged) byId.set(item.itemId, merged)
   }
   const items = [...byId.values()].sort((a, b) => a.seq - b.seq || a.createdAt.localeCompare(b.createdAt))
-  state.loadedProcesses.set(result.sourceMessageId, {
-    revision: result.revision,
+  setLoadedProcess(state, result.sourceMessageId, result.revision, {
     items,
     hasMore: result.hasMore,
     nextAfterSeq: result.nextAfterSeq,
@@ -333,8 +375,17 @@ export function buildRequestFeedbackMap(
     entry.process = proc
   }
 
-  for (const [sourceMessageId, loaded] of state.loadedProcesses) {
+  const loadedSources = new Set<string>()
+  for (const [key, loaded] of state.loadedProcesses) loadedSources.add(loaded.sourceMessageId ?? key)
+  for (const loaded of state.loadedProcessesByRevision?.values() ?? []) {
+    if (loaded.sourceMessageId) loadedSources.add(loaded.sourceMessageId)
+  }
+  for (const sourceMessageId of loadedSources) {
     const rev = userRevisions.get(sourceMessageId)
+    const loaded = rev !== undefined
+      ? getLoadedProcess(state, sourceMessageId, rev)
+      : state.loadedProcesses.get(sourceMessageId)
+    if (!loaded) continue
     if (rev !== undefined && loaded.revision !== rev) continue
     const entry = ensure(sourceMessageId)
     entry.loadingProcess = loaded.loading

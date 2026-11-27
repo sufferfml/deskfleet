@@ -976,9 +976,17 @@ export class SuperFollowUpService {
         abortedAnalyses += 1
       }
     }
+    const clearedWorkspaces = new Set<string>()
     for (const key of [...this.#pendingRequests.keys()]) {
-      if (key.startsWith(`["${userId}",`)) this.#pendingRequests.delete(key)
+      if (key.startsWith(`["${userId}",`)) {
+        this.#pendingRequests.delete(key)
+        try {
+          const parsed = JSON.parse(key) as [string, string]
+          if (parsed[1]) clearedWorkspaces.add(parsed[1])
+        } catch { /* ignore malformed key */ }
+      }
     }
+    for (const wid of clearedWorkspaces) this.#deps.onRoomChanged?.(userId, wid)
 
     const now = this.#nowIso()
     const PAGE_SIZE = 200

@@ -15,7 +15,8 @@ import {
 } from "./follow-up-evidence.ts"
 import type { FollowUpEvidenceAvailability, FollowUpPrRef, FollowUpProvenance, FollowUpSourceState } from "@deskfleet/protocol/super-agent-follow-up"
 import { deliverToMainChat, type FollowUpProcessorContext } from "./follow-up-schedules.ts"
-import { note, roomFor } from "./state.ts"
+import { isDeepStrictEqual } from "node:util"
+import { bumpVisibleSeq, note, roomFor } from "./state.ts"
 import { ownedByActor } from "./target.ts"
 import { computeEvidenceVersion, triageFollowUpEvent } from "./triage.ts"
 import { activeTurn } from "./worker.ts"
@@ -87,9 +88,12 @@ async function isScheduleRunTurn(
 
 export function clearSessionPendingRequests(ctx: FollowUpProcessorContext, userId: string, workspaceId: string, sessionId: string): void {
   const key = JSON.stringify([userId, workspaceId])
-  const remaining = (ctx.pendingRequests.get(key) ?? []).filter(req => req.item.sessionId !== sessionId)
+  const previous = ctx.pendingRequests.get(key) ?? []
+  const remaining = previous.filter(req => req.item.sessionId !== sessionId)
+  if (remaining.length === previous.length) return
   if (remaining.length) ctx.pendingRequests.set(key, remaining)
   else ctx.pendingRequests.delete(key)
+  ctx.deps.onRoomChanged?.(userId, workspaceId)
 }
 
 export async function refreshSessionPendingRequests(
@@ -104,7 +108,8 @@ export async function refreshSessionPendingRequests(
     return
   }
   const key = JSON.stringify([userId, workspaceId])
-  const current = (ctx.pendingRequests.get(key) ?? []).filter(req => req.item.sessionId !== sessionId)
+  const previous = ctx.pendingRequests.get(key) ?? []
+  const current = previous.filter(req => req.item.sessionId !== sessionId)
   if (snapshot.session.archiveState === "active" && snapshot.session.lifecycle === "ready") {
     // Only expose requests belonging to turns owned by this user.
     const isOwnedRequest = (turnId?: string) => !turnId || inspectTurnOwnership(snapshot, turnId, userId).readable
@@ -116,8 +121,11 @@ export async function refreshSessionPendingRequests(
       .map(item => ({ kind: "elicitation" as const, item, ticketId: `session:${sessionId}`, sourceKind: "session" as const, sourceId: sessionId, sourceTitle: snapshot.session.title }))
     current.push(...permissions, ...elicitations)
   }
-  if (current.length) ctx.pendingRequests.set(key, current)
-  else ctx.pendingRequests.delete(key)
+  if (!isDeepStrictEqual(previous, current)) {
+    if (current.length) ctx.pendingRequests.set(key, current)
+    else ctx.pendingRequests.delete(key)
+    ctx.deps.onRoomChanged?.(userId, workspaceId)
+  }
 }
 
 export async function maybeAutoEnrollOrdinarySession(ctx: FollowUpProcessorContext, snapshot: AgentSnapshot): Promise<void> {
@@ -166,10 +174,13 @@ export async function maybeAutoEnrollOrdinarySession(ctx: FollowUpProcessorConte
 
 function clearSchedulePendingRequests(ctx: FollowUpProcessorContext, userId: string, workspaceId: string, sessionId: string, scheduleId?: string): void {
   const key = JSON.stringify([userId, workspaceId])
-  const remaining = (ctx.pendingRequests.get(key) ?? []).filter(req =>
+  const previous = ctx.pendingRequests.get(key) ?? []
+  const remaining = previous.filter(req =>
     req.item.sessionId !== sessionId || (scheduleId !== undefined && (req.sourceKind !== "schedule" || req.sourceId !== scheduleId)))
+  if (remaining.length === previous.length) return
   if (remaining.length) ctx.pendingRequests.set(key, remaining)
   else ctx.pendingRequests.delete(key)
+  ctx.deps.onRoomChanged?.(userId, workspaceId)
 }
 
 function findScheduleRunsForSession(
@@ -265,7 +276,8 @@ export async function syncScheduleSessionRequests(
     }
 
     const key = JSON.stringify([uid, task.workspaceId])
-    const current = (ctx.pendingRequests.get(key) ?? []).filter(req =>
+    const previous = ctx.pendingRequests.get(key) ?? []
+    const current = previous.filter(req =>
       req.item.sessionId !== sessionId || req.sourceKind !== "schedule" || req.sourceId !== task.id)
 
     const sessionActive = snapshot.session.archiveState === "active" && snapshot.session.lifecycle === "ready"
@@ -300,8 +312,11 @@ export async function syncScheduleSessionRequests(
         })
       }
     }
-    if (current.length) ctx.pendingRequests.set(key, current)
-    else ctx.pendingRequests.delete(key)
+    if (!isDeepStrictEqual(previous, current)) {
+      if (current.length) ctx.pendingRequests.set(key, current)
+      else ctx.pendingRequests.delete(key)
+      ctx.deps.onRoomChanged?.(uid, task.workspaceId)
+    }
 
     // Sync cross-end resolution on any existing cards first.
     for (const perm of snapshot.permissions) {
@@ -723,6 +738,7 @@ export async function processSubscribedSession(
         sessionId, turnId: turn.id, ticketId: linkedTicketId, messageId: deliveredMessageId, reason: triage.reason,
         createdAt: now, updatedAt: now,
       })
+      ctx.deps.onRoomChanged?.(userId, workspaceId)
 
       await ctx.deps.followUpStore.updateSource(userId, workspaceId, "session", sessionId, () => sub.state, state => {
         if (progress.state === "repeated_failure" && progress.issueKey) {
@@ -950,6 +966,7 @@ export async function checkStalledSession(
     sessionId, turnId: runningTurn?.id, ticketId: linkedTicketId, messageId: deliveredMessageId, reason: triage.reason,
     createdAt: nowIso, updatedAt: nowIso,
   })
+  ctx.deps.onRoomChanged?.(userId, workspaceId)
 
   await ctx.deps.followUpStore.updateSource(userId, workspaceId, "session", sessionId, () => postSub.state, state => {
     state.lastErrorKey = progress.issueKey
@@ -1055,10 +1072,10 @@ async function postRequestNotice(
   workerEvent: "permission" | "question", requestId: string, turnId: string | undefined, summary: string,
   provenance: FollowUpProvenance,
 ): Promise<string> {
-  return ctx.deps.superStore.update(userId, () => ({ rooms: [], intents: [] }), state => {
+  const result = await ctx.deps.superStore.update(userId, () => ({ rooms: [], intents: [] }), state => {
     const room = roomFor(state, workspaceId)
     const existing = room.messages.findLast(m => m.sessionId === sessionId && m.workerEvent === workerEvent && m.workerRequestId === requestId)
-    if (existing) return existing.id
+    if (existing) return { id: existing.id, created: false }
     const msg = note(room, summary, {
       role: "worker",
       sessionId,
@@ -1067,8 +1084,11 @@ async function postRequestNotice(
       workerRequestId: requestId,
       provenance,
     })
-    return msg.id
+    if (workerEvent === "question") bumpVisibleSeq(room, msg)
+    return { id: msg.id, created: true }
   })
+  if (result.created) ctx.deps.onRoomChanged?.(userId, workspaceId)
+  return result.id
 }
 
 async function postOrdinaryRequestNotice(
@@ -1087,11 +1107,11 @@ async function resolveOrdinaryRequestNotice(
   userId: string, workspaceId: string, sessionId: string,
   workerEvent: "permission" | "question", req: AgentPermission | AgentElicitation,
 ): Promise<void> {
-  await ctx.deps.superStore.update(userId, () => ({ rooms: [], intents: [] }), state => {
+  const changed = await ctx.deps.superStore.update(userId, () => ({ rooms: [], intents: [] }), state => {
     const room = state.rooms.find(r => r.workspaceId === workspaceId)
-    if (!room) return
+    if (!room) return false
     const notice = room.messages.findLast(m => m.sessionId === sessionId && m.workerEvent === workerEvent && m.workerRequestId === req.id)
-    if (!notice) return
+    if (!notice) return false
     const permission = workerEvent === "permission" ? req as AgentPermission : undefined
     const question = workerEvent === "question" ? req as AgentElicitation : undefined
     const selected = permission?.request.options.find(option => option.optionId === permission.optionId)
@@ -1099,6 +1119,10 @@ async function resolveOrdinaryRequestNotice(
       ? "Cancelled"
       : selected?.name ?? (question?.response?.action === "decline" ? "Declined" : "Answered")
     const title = (permission?.request.toolCall.title ?? question?.request.message ?? "").slice(0, 600)
-    notice.text = [outcome, title].filter(Boolean).join(" · ")
+    const nextText = [outcome, title].filter(Boolean).join(" · ")
+    if (notice.text === nextText) return false
+    notice.text = nextText
+    return true
   })
+  if (changed) ctx.deps.onRoomChanged?.(userId, workspaceId)
 }

@@ -7,13 +7,16 @@ import type { DeskfleetDesktopApi } from "@deskfleet/client/desktop-api"
 import { remoteMachineClient } from "@deskfleet/client/remote"
 import { accountSessionKey, type AccountSession } from "./useAccountSession.ts"
 import { platformClientKey } from "./usePlatformClient.ts"
+import { createHiddenWorkspaces, type HiddenWorkspaces } from "./useHiddenWorkspaces.ts"
 import { createSidebarFilter, type SidebarFilterState } from "./useSidebarFilter.ts"
 import { createSidebarOrder, type SidebarOrder } from "./useSidebarOrder.ts"
+import { createWorkspaceAgentSummary, workspaceAgentSummaryKey, type WorkspaceAgentSummaryStore } from "./useWorkspaceAgentSummary.ts"
 import { i18n } from "../i18n/index.ts"
 import { router } from "../router/index.ts"
 import { appearanceStoreKey, type useAppearanceStore } from "../stores/appearance.ts"
 import { outlineAudioStoreKey, type useOutlineAudioStore } from "../stores/outline-audio.ts"
 import { useAgentSessionsStore } from "../stores/agent-sessions.ts"
+import { useFleetStore } from "../stores/fleet.ts"
 import { useTerminalsStore } from "../stores/terminals.ts"
 import { machineBatteriesKey, type MachineBatteriesStore } from "../stores/machine-batteries.ts"
 import { installErrorReporting } from "../services/error-reporting.ts"
@@ -21,7 +24,7 @@ import { installErrorReporting } from "../services/error-reporting.ts"
 export interface MachineRuntime {
   state: ReturnType<typeof createPinia>
   api: DeskfleetDesktopApi
-  refreshCatalog(): void
+  refreshCatalog(): void | Promise<void>
   updateMachine(machine: Machine, rosterRefreshed?: boolean): void
   mount(component: Component, root: Element): () => void
   dispose(): void
@@ -31,6 +34,8 @@ export interface MachineRuntimes {
   sidebarScrollTop: number
   sidebarFilter: SidebarFilterState
   sidebarOrder: SidebarOrder
+  hiddenWorkspaces: HiddenWorkspaces
+  workspaceAgentSummary?: WorkspaceAgentSummaryStore
   open(machine: Machine): MachineRuntime
 }
 
@@ -56,6 +61,8 @@ export function createMachineRuntimes(
   }
   const identity = computed(() => JSON.stringify([session.account.value.serverUrl, session.account.value.user?.id, session.teamId.value]))
   const sidebarOrder = createSidebarOrder(identity)
+  const hiddenWorkspaces = createHiddenWorkspaces(identity)
+  const workspaceAgentSummary = createWorkspaceAgentSummary({ host, session })
   const owner = computed(() => JSON.stringify([session.account.value.serverUrl, session.account.value.user?.id]))
   watch(owner, (_, previous) => { void clearConversationOwner(previous) })
   watch(identity, () => {
@@ -63,6 +70,7 @@ export function createMachineRuntimes(
     runtimes.sidebarScrollTop = 0
     sidebarFilter.filter.value = "all"
     sidebarFilter.counts.clear()
+    workspaceAgentSummary.resetScope()
   }, { flush: "sync" })
   watch(() => [session.machines.value.map(machine => ({ ...machine })), session.machineRosterVersion.value] as const, ([machines, version], [, previousVersion]) => {
     for (const [id, runtime] of opened) {
@@ -71,13 +79,18 @@ export function createMachineRuntimes(
       else release(id)
     }
   })
-  onScopeDispose(() => { for (const id of opened.keys()) release(id) })
+  onScopeDispose(() => {
+    workspaceAgentSummary.dispose()
+    for (const id of opened.keys()) release(id)
+  })
 
   const runtimes: MachineRuntimes = {
     opened,
     sidebarScrollTop: 0,
     sidebarFilter,
     sidebarOrder,
+    hiddenWorkspaces,
+    workspaceAgentSummary,
     open(machine) {
       if (session.teamId.value !== machine.teamId) throw new Error("Machine is outside the selected team")
       const existing = opened.get(machine.id)
@@ -143,7 +156,12 @@ export function createMachineRuntimes(
       const runtime: MachineRuntime = {
         state,
         api: remote.api,
-        refreshCatalog: remote.refreshCatalog,
+        refreshCatalog() {
+          if (disposed) return
+          remote.refreshCatalog()
+          if (!mounted) return
+          return useFleetStore(state).waitForCatalogRefresh()
+        },
         updateMachine(value, rosterRefreshed) {
           remote.updateMachine(value, rosterRefreshed)
           supportsRemoteFrontDesk.value = value.capabilities?.superAgent === true
@@ -157,6 +175,7 @@ export function createMachineRuntimes(
             .provide(outlineAudioStoreKey, outlineAudio)
             .provide(platformClientKey, remote.api)
             .provide(machineRuntimesKey, runtimes)
+            .provide(workspaceAgentSummaryKey, workspaceAgentSummary)
             .provide(machineBatteriesKey, batteries)
             .use(state).use(router).use(i18n)
           app.config.idPrefix = `machine-${machine.id}-${++viewId}`

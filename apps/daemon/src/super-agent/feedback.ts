@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
 import type { SuperWorkspaceId } from "@deskfleet/protocol/super-agent"
+import { recordRoomRecentTicketAccent } from "./accent.ts"
 import type { SuperRoom } from "./state.ts"
 import {
   boundFeedbackText,
@@ -560,6 +561,9 @@ export function persistRoomFeedbackItem(room: SuperRoom, item: SuperFeedbackItem
   }
   const copy = structuredClone(item)
   room.feedbackItems.push(copy)
+  if (copy.ticketId && (copy.kind === "milestone" || copy.kind === "ack")) {
+    recordRoomRecentTicketAccent(room, copy.ticketId)
+  }
   if (room.feedbackItems.length > MAX_PERSISTED_FEEDBACK_ITEMS) {
     room.feedbackItems.splice(0, room.feedbackItems.length - MAX_PERSISTED_FEEDBACK_ITEMS)
   }

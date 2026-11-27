@@ -16,6 +16,10 @@ import { useFleetStore } from "../../stores/fleet.ts"
 import { useTerminalsStore } from "../../stores/terminals.ts"
 import { fakeCentral, machineFixture } from "../../test/central.ts"
 import { accountSessionKey, createAccountSession, type AccountSession } from "../../composables/useAccountSession.ts"
+import { createHiddenWorkspaces, HIDDEN_WORKSPACES_STORAGE_KEY } from "../../composables/useHiddenWorkspaces.ts"
+import { machineRuntimesKey, type MachineRuntimes } from "../../composables/useMachineRuntimes.ts"
+import { createSidebarFilter } from "../../composables/useSidebarFilter.ts"
+import { createSidebarOrder } from "../../composables/useSidebarOrder.ts"
 import type { GithubPullRequest } from "@deskfleet/client/central"
 import type { SystemStatus } from "@deskfleet/client/system"
 import { usePullRequestsStore } from "../../stores/pull-requests.ts"
@@ -28,6 +32,7 @@ async function setup(
   pullRequest?: GithubPullRequest,
   superAgent?: SuperAgentApi,
   battery?: NonNullable<SystemStatus["battery"]>,
+  runtimes?: MachineRuntimes,
 ) {
   const pinia = createPinia()
   setActivePinia(pinia)
@@ -52,6 +57,7 @@ async function setup(
     } },
     global: { plugins: [pinia, router, i18n], provide: {
       ...(account && { [accountSessionKey as symbol]: account }),
+      ...(runtimes && { [machineRuntimesKey as symbol]: runtimes }),
       ...(superAgent && { [platformClientKey as symbol]: { ...getClient(), superAgent } }),
     } },
   })
@@ -451,7 +457,7 @@ test("workspace row context menu edits and deletes without expanding or collapsi
   await flushPromises()
   expect(event.defaultPrevented).toBe(true)
   expect(folder.attributes("aria-expanded")).toBe("true")
-  expect(page.findAll('[role="menuitem"]').map(item => item.text())).toEqual(["Edit workspace", "Delete workspace"])
+  expect(page.findAll('[role="menuitem"]').map(item => item.text())).toEqual(["Edit workspace", "Hide workspace", "Delete workspace"])
 
   await page.findAll('[role="menuitem"]').find(item => item.text() === "Edit workspace")!.trigger("click")
   await flushPromises()
@@ -666,4 +672,236 @@ test("the default workspace opens independently of its trailing Worker disclosur
   }
 })
 
-afterEach(() => { useWorkspaceAgentMode().value = false })
+test("project sidebar supports hide -> reopen persistence -> machine reveal -> unhide round-trip without stopping tasks or deleting data", async () => {
+  i18n.global.locale.value = "zh-cmn-Hans-CN"
+  useWorkspaceAgentMode().value = true
+  const superAgent: SuperAgentApi = { snapshot: vi.fn(), send: vi.fn(), settings: vi.fn(), correct: vi.fn() }
+  const workspaces = [
+    {
+      id: "ws-alpha", name: "alpha", directories: [{ path: "/code/alpha" }], terminals: [],
+      sessions: [{ id: "running-1", title: "Running task", provider: "Codex", context: "directory" as const, archiveState: "active" as const }],
+    },
+    { id: "ws-beta", name: "beta", directories: [{ path: "/code/beta" }], terminals: [], sessions: [] },
+    { id: "ws-gamma", name: "gamma", directories: [{ path: "/code/gamma" }], terminals: [], sessions: [] },
+  ]
+  const page = new DOMWrapper(document.body)
+  const clickMenu = async (label: string) => {
+    const item = page.findAll('[role="menuitem"]').find(entry => entry.text() === label)
+    expect(item, `menu item "${label}" should exist`).toBeDefined()
+    await item!.trigger("click")
+    await flushPromises()
+  }
+
+  // First mount: hide alpha and beta; verify live task and catalog stay untouched.
+  const first = await setup({ id: "mac-mini", name: "morrowdeMac-mini.local", workspaces }, undefined, undefined, superAgent)
+  const fleet = useFleetStore()
+  const agents = useAgentSessionsStore()
+  const deleteWorkspace = vi.spyOn(fleet, "deleteWorkspace")
+  const updateWorkspace = vi.spyOn(fleet, "updateWorkspace")
+  const archiveSession = vi.spyOn(agents, "archive")
+  const removeSession = vi.spyOn(agents, "remove")
+  markWorking("running-1")
+  await flushPromises()
+
+  // Right-click machine before anything is hidden: "显示隐藏工作区" is disabled.
+  const firstMachineHeader = first.wrapper.get('[data-machine-id="mac-mini"] button')
+  firstMachineHeader.element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 20, clientY: 20 }))
+  await flushPromises()
+  expect(page.get('[data-machine-action="toggle-hidden-workspaces"]').text()).toBe("显示隐藏工作区")
+  expect(page.get('[data-machine-action="toggle-hidden-workspaces"]').attributes("data-disabled")).toBeDefined()
+  await page.get('[role="menu"]').trigger("keydown", { key: "Escape" })
+  await flushPromises()
+
+  // Hide alpha and beta via workspace context menu.
+  first.wrapper.get('[data-project-workspace="ws-alpha"] [data-open-project]').element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 40, clientY: 60 }))
+  await flushPromises()
+  await clickMenu("隐藏工作区")
+
+  first.wrapper.get('[data-project-workspace="ws-beta"] [data-open-project]').element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 40, clientY: 80 }))
+  await flushPromises()
+  await clickMenu("隐藏工作区")
+
+  expect(first.wrapper.findAll("[data-project-workspace]").map(row => row.attributes("data-project-workspace"))).toEqual(["ws-gamma"])
+  expect(deleteWorkspace).not.toHaveBeenCalled()
+  expect(updateWorkspace).not.toHaveBeenCalled()
+  expect(archiveSession).not.toHaveBeenCalled()
+  expect(removeSession).not.toHaveBeenCalled()
+  expect(agents.isWorking("running-1")).toBe("working")
+  first.wrapper.unmount()
+
+  // Reopen app (fresh Pinia + component): alpha and beta remain hidden even if renamed, because stable IDs are persisted.
+  const reopened = await setup({
+    id: "mac-mini",
+    name: "morrowdeMac-mini-renamed.local",
+    workspaces: [
+      { ...workspaces[0]!, name: "alpha-renamed" },
+      workspaces[1]!,
+      workspaces[2]!,
+    ],
+  }, undefined, undefined, superAgent)
+  expect(reopened.wrapper.findAll("[data-project-workspace]").map(row => row.attributes("data-project-workspace"))).toEqual(["ws-gamma"])
+
+  // Right-click machine row -> "显示隐藏工作区": reveals hidden entries with distinct markers without unhiding them.
+  const machineHeader = reopened.wrapper.get('[data-machine-id="mac-mini"] button')
+  const machineEvent = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 24, clientY: 32 })
+  machineHeader.element.dispatchEvent(machineEvent)
+  await flushPromises()
+  expect(machineEvent.defaultPrevented).toBe(true)
+  await clickMenu("显示隐藏工作区")
+
+  expect(reopened.wrapper.find("[data-hidden-workspaces-header]").text()).toContain("已隐藏工作区")
+  expect(reopened.wrapper.findAll('[data-project-workspace]:not([data-workspace-hidden])').map(row => row.attributes("data-project-workspace"))).toEqual(["ws-gamma"])
+  const hiddenRows = reopened.wrapper.findAll('[data-project-workspace][data-workspace-hidden="true"]')
+  expect(hiddenRows.map(row => row.attributes("data-project-workspace"))).toEqual(["ws-alpha", "ws-beta"])
+  for (const row of hiddenRows) {
+    expect(row.get("[data-workspace-hidden-badge]").text()).toBe("已隐藏")
+  }
+
+  // Clicking/viewing a hidden workspace does NOT unhide it.
+  await reopened.wrapper.get('[data-project-workspace="ws-alpha"] [data-open-project]').trigger("click")
+  await flushPromises()
+  expect(reopened.router.currentRoute.value.fullPath).toBe("/workspaces/ws-alpha/agent?machine=mac-mini")
+  expect(reopened.wrapper.get('[data-project-workspace="ws-alpha"]').attributes("data-workspace-hidden")).toBe("true")
+
+  // Right-click one hidden entry -> "取消隐藏": restores only alpha to the regular list; beta stays hidden.
+  reopened.wrapper.get('[data-project-workspace="ws-alpha"] [data-open-project]').element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 40, clientY: 120 }))
+  await flushPromises()
+  await clickMenu("取消隐藏")
+
+  expect(reopened.wrapper.findAll('[data-project-workspace]:not([data-workspace-hidden])').map(row => row.attributes("data-project-workspace"))).toEqual(["ws-alpha", "ws-gamma"])
+  expect(reopened.wrapper.findAll('[data-project-workspace][data-workspace-hidden="true"]').map(row => row.attributes("data-project-workspace"))).toEqual(["ws-beta"])
+
+  // Dismiss hidden preview via machine context menu -> alpha stays visible, beta disappears again.
+  machineHeader.element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 24, clientY: 32 }))
+  await flushPromises()
+  await clickMenu("收起隐藏工作区")
+  expect(reopened.wrapper.findAll("[data-project-workspace]").map(row => row.attributes("data-project-workspace"))).toEqual(["ws-alpha", "ws-gamma"])
+  expect(reopened.wrapper.find("[data-hidden-workspaces-header]").exists()).toBe(false)
+  reopened.wrapper.unmount()
+
+  // Reopen app again: alpha stays visible in regular list, beta stays hidden.
+  const final = await setup({ id: "mac-mini", name: "morrowdeMac-mini.local", workspaces }, undefined, undefined, superAgent)
+  expect(final.wrapper.findAll("[data-project-workspace]").map(row => row.attributes("data-project-workspace"))).toEqual(["ws-alpha", "ws-gamma"])
+  final.wrapper.unmount()
+})
+
+test("two machines with same-name and same-id workspaces keep hidden state and machine reveal strictly isolated", async () => {
+  i18n.global.locale.value = "zh-cmn-Hans-CN"
+  useWorkspaceAgentMode().value = true
+  const superAgent: SuperAgentApi = { snapshot: vi.fn(), send: vi.fn(), settings: vi.fn(), correct: vi.fn() }
+  const account = createAccountSession(fakeCentral({
+    machines: [
+      machineFixture("machine-a", "team-1", "morrowdeMac-mini.local"),
+      machineFixture("machine-b", "team-1", "workstation.local"),
+    ],
+  }).central)
+  await flushPromises()
+
+  const sharedRuntimes: MachineRuntimes = {
+    opened: new Map([["machine-a", {} as never], ["machine-b", {} as never]]),
+    sidebarScrollTop: 0,
+    sidebarFilter: createSidebarFilter(),
+    sidebarOrder: createSidebarOrder("team-1"),
+    hiddenWorkspaces: createHiddenWorkspaces("team-1"),
+    open: vi.fn(),
+  }
+  const sharedWorkspaces = [
+    { id: "7", name: "deskfleet-sa", directories: [{ path: "/code/deskfleet-sa" }], terminals: [], sessions: [] },
+    { id: "8", name: "notes", directories: [{ path: "/code/notes" }], terminals: [], sessions: [] },
+  ]
+  const page = new DOMWrapper(document.body)
+  const clickMenu = async (label: string) => {
+    const item = page.findAll('[role="menuitem"]').find(entry => entry.text() === label)
+    expect(item, `menu item "${label}" should exist`).toBeDefined()
+    await item!.trigger("click")
+    await flushPromises()
+  }
+
+  const machineA = await setup({ id: "machine-a", name: "morrowdeMac-mini.local", workspaces: sharedWorkspaces }, account, undefined, superAgent, undefined, sharedRuntimes)
+  const machineB = await setup({ id: "machine-b", name: "workstation.local", local: false, workspaces: sharedWorkspaces }, account, undefined, superAgent, undefined, sharedRuntimes)
+  try {
+    // Hide "deskfleet-sa" (id: 7) on machine A only -> machine B is unaffected.
+    machineA.wrapper.get('[data-project-workspace="7"] [data-open-project]').element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 30, clientY: 60 }))
+    await flushPromises()
+    await clickMenu("隐藏工作区")
+
+    expect(machineA.wrapper.findAll("[data-project-workspace]").map(row => row.attributes("data-project-workspace"))).toEqual(["8"])
+    expect(machineB.wrapper.findAll("[data-project-workspace]").map(row => row.attributes("data-project-workspace"))).toEqual(["7", "8"])
+
+    // Hide "deskfleet-sa" (id: 7) on machine B as well.
+    machineB.wrapper.get('[data-project-workspace="7"] [data-open-project]').element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 30, clientY: 160 }))
+    await flushPromises()
+    await clickMenu("隐藏工作区")
+    expect(machineB.wrapper.findAll("[data-project-workspace]").map(row => row.attributes("data-project-workspace"))).toEqual(["8"])
+
+    // Right-click machine A -> "显示隐藏工作区": ONLY machine A reveals its hidden entry; machine B stays hidden.
+    machineA.wrapper.get('[data-machine-id="machine-a"] button').element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 20, clientY: 20 }))
+    await flushPromises()
+    await clickMenu("显示隐藏工作区")
+
+    expect(machineA.wrapper.findAll('[data-project-workspace][data-workspace-hidden="true"]').map(row => row.attributes("data-project-workspace"))).toEqual(["7"])
+    expect(machineB.wrapper.findAll('[data-project-workspace][data-workspace-hidden="true"]')).toHaveLength(0)
+    expect(machineB.wrapper.findAll("[data-project-workspace]").map(row => row.attributes("data-project-workspace"))).toEqual(["8"])
+
+    // Unhide "deskfleet-sa" on machine A -> machine A restores it to regular list; machine B remains hidden.
+    machineA.wrapper.get('[data-project-workspace="7"] [data-open-project]').element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 30, clientY: 80 }))
+    await flushPromises()
+    await clickMenu("取消隐藏")
+
+    expect(machineA.wrapper.findAll('[data-project-workspace]:not([data-workspace-hidden])').map(row => row.attributes("data-project-workspace"))).toEqual(["7", "8"])
+    expect(machineA.wrapper.find("[data-hidden-workspaces-header]").exists()).toBe(false)
+    expect(machineB.wrapper.findAll("[data-project-workspace]").map(row => row.attributes("data-project-workspace"))).toEqual(["8"])
+    expect(sharedRuntimes.hiddenWorkspaces.isHidden("machine-a", "7")).toBe(false)
+    expect(sharedRuntimes.hiddenWorkspaces.isHidden("machine-b", "7")).toBe(true)
+  } finally {
+    machineA.wrapper.unmount()
+    machineB.wrapper.unmount()
+    account.dispose()
+  }
+})
+
+test("classic workspace sidebar hides, reveals on collapsed machine expansion, and unhides", async () => {
+  const { wrapper } = await setup({
+    workspaces: [
+      { id: "ws-1", name: "First", directories: [{ path: "/first" }], terminals: [], sessions: [] },
+      { id: "ws-2", name: "Second", directories: [{ path: "/second" }], terminals: [], sessions: [] },
+    ],
+  })
+  const page = new DOMWrapper(document.body)
+  const clickMenu = async (label: string) => {
+    const item = page.findAll('[role="menuitem"]').find(entry => entry.text() === label)
+    expect(item, `menu item "${label}" should exist`).toBeDefined()
+    await item!.trigger("click")
+    await flushPromises()
+  }
+
+  wrapper.get('button[aria-label="First"]').element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 40, clientY: 60 }))
+  await flushPromises()
+  await clickMenu("Hide workspace")
+  expect(wrapper.findAll("[data-workspace-id]").map(row => row.attributes("data-workspace-id"))).toEqual(["ws-2"])
+
+  // Collapse the machine first; revealing hidden workspaces from the machine menu expands it.
+  const machineToggle = wrapper.get('[data-machine-id="local-daemon"] button')
+  await machineToggle.trigger("click")
+  expect(wrapper.get('[data-machine-id="local-daemon"]').attributes("data-state")).toBe("closed")
+
+  machineToggle.element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 20, clientY: 20 }))
+  await flushPromises()
+  await clickMenu("Show hidden workspaces")
+  expect(wrapper.get('[data-machine-id="local-daemon"]').attributes("data-state")).toBe("open")
+  expect(wrapper.get('[data-workspace-id="ws-1"]').attributes("data-workspace-hidden")).toBe("true")
+  expect(wrapper.get('[data-workspace-id="ws-1"] [data-workspace-hidden-badge]').text()).toBe("Hidden")
+
+  wrapper.get('[data-workspace-id="ws-1"] button[aria-label="First"]').element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 40, clientY: 120 }))
+  await flushPromises()
+  await clickMenu("Unhide workspace")
+  expect(wrapper.findAll('[data-workspace-id]:not([data-workspace-hidden])').map(row => row.attributes("data-workspace-id"))).toEqual(["ws-1", "ws-2"])
+  expect(wrapper.find("[data-hidden-workspaces-header]").exists()).toBe(false)
+  wrapper.unmount()
+})
+
+afterEach(() => {
+  useWorkspaceAgentMode().value = false
+  localStorage.removeItem(HIDDEN_WORKSPACES_STORAGE_KEY)
+  i18n.global.locale.value = "en-US"
+})

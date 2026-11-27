@@ -5,6 +5,7 @@ import { UPDATES_CHANNEL, UPDATES_CHANGED_EVENT, type UpdateState } from "@deskf
 import { isMainRendererUrl } from "../shared/renderer-security.ts"
 import { electronUpdateDriver } from "./electron-update-driver.ts"
 import { refreshLaunchAtStartup } from "./launch-at-startup.ts"
+import { saDisplayName } from "./sa-variant.ts"
 import type { BackgroundLifecycle } from "./lifecycle.ts"
 import { UpdateController, type UpdateDriver } from "./update-controller.ts"
 
@@ -53,7 +54,7 @@ function nixManagedDarwinInstall(): boolean {
 }
 
 export function resolveDesktopInstallSource(): Extract<UpdateInstallSource, "desktop_installer" | "package_manager" | "development"> {
-  if (!app.isPackaged || app.getName() === "DeskFleet Workspace Agent") return "development"
+  if (!app.isPackaged || saDisplayName(app.getName())) return "development"
   if (nixManagedDarwinInstall()) return "package_manager"
   if (process.platform === "linux" && !process.env.APPIMAGE) return "package_manager"
   return "desktop_installer"

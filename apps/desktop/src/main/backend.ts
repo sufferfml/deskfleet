@@ -1,2 +1,9 @@
-/** Vite embeds the backend address when it builds the desktop main process. */
-export const backendUrl = import.meta.env.VITE_DESKFLEET_SERVER_URL ?? "http://localhost:8080"
+import { app } from "electron"
+import { saDisplayName } from "./sa-variant.ts"
+
+/** Vite embeds an explicit override. The installed SA app defaults to its hosted backend. */
+export const backendUrl = import.meta.env.VITE_DESKFLEET_SERVER_URL || (
+  app.isPackaged && saDisplayName(app.name)
+    ? "https://deskfleet.yetanother.ai"
+    : "http://localhost:8080"
+)

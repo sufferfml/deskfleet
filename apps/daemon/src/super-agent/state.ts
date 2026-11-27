@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto"
 import { adhdCommand } from "@deskfleet/protocol/adhd-command"
 import type { ComposerReference, ComposerSkillReference } from "@deskfleet/protocol/composer-reference"
 import type { AgentActor } from "@deskfleet/protocol/agent"
-import type { SuperCoordinator, SuperCoordinatorUsage, SuperFeedbackItem, SuperFeedbackProcessIndex, SuperMessage, SuperModelSelection, SuperSnapshot, SuperStopState, SuperTicket, SuperTicketStatus, SuperWorkerSelection, SuperWorkspaceId } from "@deskfleet/protocol/super-agent"
+import { createEmptyAccentSlotCounts, isValidAccentSlot, resolveRoomTicketAccentSlots, type SaVisibleMarkerRef, type SuperCoordinator, type SuperCoordinatorUsage, type SuperFeedbackItem, type SuperFeedbackProcessIndex, type SuperMessage, type SuperMessageTicketLinks, type SuperModelSelection, type SuperSnapshot, type SuperStopState, type SuperTicket, type SuperTicketStatus, type SuperWorkerSelection, type SuperWorkspaceId } from "@deskfleet/protocol/super-agent"
+import { recordRoomRecentTicketAccent } from "./accent.ts"
+import { resolveRoomMessageLinks } from "./message-links.ts"
 import type { WorkerTurnOutputState } from "./worker-projection.ts"
 
 export interface StoredSuperMessage extends SuperMessage {
@@ -21,8 +23,12 @@ export interface StoredSuperTicket extends SuperTicket {
   executionWorkspaceId?: string
   acceptanceMessageId?: string
   lastEventSeq?: string
+  /** Highest Worker completion event seq already projected into this SA room (including stopped SA turns). */
+  lastDeliveredSeq?: string
   output?: { turnId: string; text: string }
   turnOutput?: WorkerTurnOutputState
+  /** Internal bookkeeping: whether this ticket currently holds +1 in `room.accentSlotCounts[accentSlot]`. */
+  accentCounted?: boolean
 }
 export interface SuperRoom {
   adhdEnabled?: boolean
@@ -37,8 +43,20 @@ export interface SuperRoom {
   feedbackItems?: SuperFeedbackItem[]
   /** Durable per-request process indices referencing Worker journal slices. */
   feedbackProcesses?: SuperFeedbackProcessIndex[]
+  /** Monotonic sequence counter for SA unread-eligible visible messages/errors. */
+  visibleSeq?: number
+  /** Highest SA visible message marker seen in the viewport by this user. */
+  lastRead?: SaVisibleMarkerRef
+  /** Actionable error keys already seen in the viewport by this user. */
+  readErrorKeys?: string[]
   focusTicketId?: string
   recentTicketIds: string[]
+  /** Workspace-isolated active (unarchived) occupancy count for each of the 48 accent slots. */
+  accentSlotCounts?: number[]
+  /** Workspace-isolated MRU list (max 7) of distinct ticket accent slots seen in new messages. */
+  recentAccentSlots?: number[]
+  /** Canonical persisted message-to-ticket association map shared by coloring and ticket focus filtering. */
+  messageLinks?: SuperMessageTicketLinks
   pendingQuestion?: { ticketId: string; options: string[]; optionDisposition?: "continue" }
 }
 export interface DispatchIntent {
@@ -91,7 +109,15 @@ export const emptyState = (): SuperUserState => ({ rooms: [], intents: [] })
 export function roomFor(state: SuperUserState, workspaceId: SuperWorkspaceId, defaultProvider = ""): SuperRoom {
   let room = state.rooms.find(item => item.workspaceId === workspaceId)
   if (!room) {
-    room = { workspaceId, messages: [], tickets: [], provider: defaultProvider, recentTicketIds: [] }
+    room = {
+      workspaceId,
+      messages: [],
+      tickets: [],
+      provider: defaultProvider,
+      recentTicketIds: [],
+      accentSlotCounts: createEmptyAccentSlotCounts(),
+      recentAccentSlots: [],
+    }
     state.rooms.push(room)
   }
   return room
@@ -127,9 +153,24 @@ export function dispatchRecovery(room: SuperRoom, intents: DispatchIntent[]) {
   return recoverable
 }
 
+export const STOP_UNCONFIRMED_MS = 15_000
+
 // A missing acknowledgement is never a terminal result. Keep the durable command available for reconciliation.
-export function visibleStopState(stop: NonNullable<DispatchIntent["stop"]>): SuperStopState {
-  return stop.state === "stopping" && Date.now() - stop.requestedAt > 15_000 ? "unconfirmed" : stop.state
+export function visibleStopState(stop: NonNullable<DispatchIntent["stop"]>, unconfirmedMs = STOP_UNCONFIRMED_MS): SuperStopState {
+  return stop.state === "stopping" && Date.now() - stop.requestedAt > unconfirmedMs ? "unconfirmed" : stop.state
+}
+
+export function bumpVisibleSeq(room: SuperRoom, target: StoredSuperMessage): number {
+  let current = typeof room.visibleSeq === "number" && Number.isFinite(room.visibleSeq) ? room.visibleSeq : 0
+  for (const msg of room.messages) {
+    if (typeof msg.visibleSeq === "number" && Number.isFinite(msg.visibleSeq) && msg.visibleSeq > current) {
+      current = msg.visibleSeq
+    }
+  }
+  const next = Math.max(current, room.messages.length) + 1
+  room.visibleSeq = next
+  target.visibleSeq = next
+  return next
 }
 
 export function superTaskText(message: StoredSuperMessage): string {
@@ -138,24 +179,36 @@ export function superTaskText(message: StoredSuperMessage): string {
 }
 
 export function publicRoom(room: SuperRoom, coordinator: SuperCoordinator | undefined, provider: string, intents: DispatchIntent[],
-  phaseFor?: (message: SuperMessage) => SuperMessage["coordinatorPhase"]): SuperSnapshot {
+  phaseFor?: (message: SuperMessage) => SuperMessage["coordinatorPhase"], stopUnconfirmedMs = STOP_UNCONFIRMED_MS): SuperSnapshot {
   const recoverable = dispatchRecovery(room, intents)
   const sourceTickets = new Map(room.messages.filter(m => m.role === "user").map(m => [m.id, m.ticketId]))
   const ticketTitles = new Map(room.tickets.map(ticket => [ticket.id, ticket.title]))
+  const resolvedLegacySlots = room.tickets.some(ticket => !isValidAccentSlot(ticket.accentSlot))
+    ? resolveRoomTicketAccentSlots(room.tickets, room.recentAccentSlots ?? [])
+    : undefined
+  const messageTicketLinks = resolveRoomMessageLinks(room)
+  const explicitLinks = room.messageLinks
+  const hasExplicitLink = (id: string) => !!explicitLinks && Object.prototype.hasOwnProperty.call(explicitLinks, id)
   const markerKey = (messageId: string, ticketId: string) => JSON.stringify([messageId, ticketId])
   const markers = new Map<string, SuperMessage>()
   const snapshot: SuperSnapshot = {
     workerAutoApprove: room.workerAutoApprove === true,
     workerSelection: room.provider === provider ? room.workerSelection ?? {} : {},
     coordinator, workspaceId: room.workspaceId, provider, focusTicketId: room.focusTicketId,
+    ...(room.lastRead ? { lastRead: { ...room.lastRead } } : {}),
+    ...(room.readErrorKeys?.length ? { readErrorKeys: [...room.readErrorKeys] } : {}),
+    ...(Object.keys(messageTicketLinks).length ? { messageTicketLinks } : {}),
     messages: room.messages.map(({ actor, clientTimeZone, correctedTicketId, corrections, options, attachmentKeys, workerRequestId, adhdEnabled, ...message }) => {
       if (message.state === "routing") message.coordinatorPhase = phaseFor?.(message) ?? "waitingForCoordinator"
       if (message.workerEvent === "permission" || message.workerEvent === "question") message.text = withoutWorkerLink(message.text)
       if (message.role === "user" && actor?.userId) {
         message.author = { kind: "user", userId: actor.userId, ...(actor.sourceMachine && { sourceMachine: actor.sourceMachine }) }
       }
-      if (message.role === "assistant" && !message.ticketId && message.sourceMessageId) {
+      if (message.role === "assistant" && !message.ticketId && message.sourceMessageId && !hasExplicitLink(message.id)) {
         message.ticketId = sourceTickets.get(message.sourceMessageId)
+      }
+      if (Object.prototype.hasOwnProperty.call(messageTicketLinks, message.id)) {
+        message.ticketIds = [...messageTicketLinks[message.id]!]
       }
       if (message.role === "assistant" && message.sourceMessageId && message.ticketId && sourceTickets.has(message.sourceMessageId)) {
         const legacyDispatch = !message.kind && message.reason !== undefined && message.text === ticketTitles.get(message.ticketId)
@@ -168,7 +221,10 @@ export function publicRoom(room: SuperRoom, coordinator: SuperCoordinator | unde
       if (message.role === "user" && message.state === "failed" && message.reason === missingCoordinatorProvider) message.failureCode = "coordinator_unconfigured"
       return message
     }),
-    tickets: room.tickets.map(({ executionWorkspaceId, acceptanceMessageId, lastEventSeq, output, turnOutput, ...ticket }) => ({ ...ticket, summary: withoutWorkerLink(ticket.summary) })),
+    tickets: room.tickets.map(({ executionWorkspaceId, acceptanceMessageId, lastEventSeq, lastDeliveredSeq, output, turnOutput, accentCounted, ...ticket }) => {
+      const slot = isValidAccentSlot(ticket.accentSlot) ? ticket.accentSlot : resolvedLegacySlots?.get(ticket.id)
+      return { ...ticket, ...(slot !== undefined ? { accentSlot: slot } : {}), summary: withoutWorkerLink(ticket.summary) }
+    }),
   }
   for (const intent of intents) {
     if (intent.roomId !== room.workspaceId || intent.phase === "withdrawn" && !intent.stop) continue
@@ -176,7 +232,7 @@ export function publicRoom(room: SuperRoom, coordinator: SuperCoordinator | unde
     if (!marker) continue
     marker.canStop = intent.operation !== "stop" && intent.phase !== "failed" && intent.phase !== "withdrawn"
     if (intent.operation !== "stop" && (intent.phase === "planned" || intent.phase === "working")) marker.dispatching = true
-    if (intent.stop) marker.stopState = visibleStopState(intent.stop)
+    if (intent.stop) marker.stopState = visibleStopState(intent.stop, stopUnconfirmedMs)
     if (intent.sharedTurn) marker.sharedTurn = true
     if (intent.inputId) marker.inputId = intent.inputId
     // A queued submit can share a session with a running turn belonging to another input.
@@ -196,6 +252,7 @@ export function userFocus(room: SuperRoom, ticketId?: string) {
 export function note(room: SuperRoom, text: string, fields: Partial<StoredSuperMessage> = {}): StoredSuperMessage {
   const message: StoredSuperMessage = { id: randomUUID(), createdAt: new Date().toISOString(), role: "assistant", text, ...fields }
   room.messages.push(message)
+  if (message.ticketId) recordRoomRecentTicketAccent(room, message.ticketId)
   return message
 }
 export function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error) }

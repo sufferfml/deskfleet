@@ -260,7 +260,7 @@ export class AgentChannel {
         if (!this.#closed) this.#queue({ jsonrpc: "2.0", id, result: null })
         return
       }
-      if (this.#sessions.superAgent && ["snapshot", "send", "stop", "correct", "settings", "history", "archiveTicket", "followUpAuth", "followUpSources", "followUpUpdateSource", "followUpRuns", "feedbackProcess"].some(name => method === `_deskfleet/super-agent/${name}`)) {
+      if (this.#sessions.superAgent && ["snapshot", "summary", "markRead", "send", "stop", "correct", "linkMessage", "createTicket", "settings", "history", "archiveTicket", "followUpAuth", "followUpSources", "followUpUpdateSource", "followUpRuns", "feedbackProcess"].some(name => method === `_deskfleet/super-agent/${name}`)) {
         const result = await this.#sessions.superAgent(method, params, this.#actor)
         if (!this.#closed) this.#queue({ jsonrpc: "2.0", id, result })
         return

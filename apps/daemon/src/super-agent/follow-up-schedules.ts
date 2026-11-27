@@ -27,7 +27,8 @@ import {
 } from "@deskfleet/protocol/super-agent-follow-up"
 import { isTerminalRunStatus, RUN_STATE_RANK, type FollowUpStore } from "./follow-up-store.ts"
 import type { SuperWorkerRequest, SuperWorkspace, SuperWorkspaceId } from "@deskfleet/protocol/super-agent"
-import { note, roomFor, type SuperStateStore } from "./state.ts"
+import { allocateTicketAccent } from "./accent.ts"
+import { bumpVisibleSeq, note, roomFor, type SuperStateStore } from "./state.ts"
 import { computeEvidenceVersion, triageFollowUpEvent, type TriageModel } from "./triage.ts"
 import type { SuperWorkers } from "./worker.ts"
 
@@ -46,6 +47,8 @@ export interface FollowUpServiceDeps {
   triageModel?: (userId: string) => TriageModel | undefined
   githubPullRequest?: (actor: AgentActor, query: GithubPullRequestQuery) => Promise<{ pullRequest: GithubPullRequest | null }>
   isInteractiveBusy?: (userId: string, workspaceId: SuperWorkspaceId) => boolean
+  /** Notifies active room feedback subscribers after durable background follow-up state settles. */
+  onRoomChanged?: (userId: string, workspaceId: SuperWorkspaceId, sourceMessageId?: string) => void
   now?: () => Date
   retryBaseMs?: number
   retryMaxMs?: number
@@ -138,7 +141,7 @@ export async function deliverToMainChat(
     ...(payload.issueKey ? { issueKey: payload.issueKey } : {}),
     evidenceAvailability: payload.evidenceAvailability,
   }
-  return ctx.deps.superStore.update(userId, () => ({ rooms: [], intents: [] }), state => {
+  const result = await ctx.deps.superStore.update(userId, () => ({ rooms: [], intents: [] }), state => {
     const room = roomFor(state, workspaceId)
     // 1. Deduplicate ONLY against an existing final Worker/follow-up delivery for the exact same
     //    (sessionId, turnId/inputId). Never let a permission/question card or stall notice swallow
@@ -170,6 +173,7 @@ export async function deliverToMainChat(
       if (existingIssue) {
         existingIssue.text = payload.text
         existingIssue.provenance = { ...existingIssue.provenance, ...provenance }
+        bumpVisibleSeq(room, existingIssue)
         return { messageId: existingIssue.id, ticketId: existingIssue.ticketId }
       }
     }
@@ -186,6 +190,7 @@ export async function deliverToMainChat(
         provider: payload.provider || room.provider,
         updatedAt: ctx.nowIso(),
       }
+      allocateTicketAccent(room, ticket)
       room.tickets.push(ticket)
       ticketId = ticket.id
     }
@@ -199,8 +204,11 @@ export async function deliverToMainChat(
       provenance,
       ...(payload.options?.length ? { options: payload.options } : {}),
     })
+    bumpVisibleSeq(room, msg)
     return { messageId: msg.id, ticketId }
   })
+  ctx.deps.onRoomChanged?.(userId, workspaceId)
+  return result
 }
 
 async function preservePrePauseDeferredRun(
@@ -403,18 +411,21 @@ export async function processSchedulePrivateEvent(
           state.scheduleVersion = event.scheduleVersion
           delete state.deferredPrePauseRuns
         })
-        await ctx.deps.superStore.update(uid, () => ({ rooms: [], intents: [] }), state => {
+        const added = await ctx.deps.superStore.update(uid, () => ({ rooms: [], intents: [] }), state => {
           const room = roomFor(state, event.workspaceId)
           const dedupId = `schedule-ownership:${event.scheduleId}:${event.scheduleVersion}`
-          if (room.messages.some(m => m.id === dedupId)) return
-          note(room, `Scheduled task "${event.scheduleTitle}" was edited by another team member. SA private follow-up has been paused until you review the changes and re-confirm subscription.`, {
+          if (room.messages.some(m => m.id === dedupId)) return false
+          const created = note(room, `Scheduled task "${event.scheduleTitle}" was edited by another team member. SA private follow-up has been paused until you review the changes and re-confirm subscription.`, {
             id: dedupId,
             provenance: {
               origin: "sa_follow_up", sourceKind: "schedule", sourceId: event.scheduleId,
               scheduleId: event.scheduleId, scheduleTitle: event.scheduleTitle, targetKind: event.targetKind,
             },
           })
+          bumpVisibleSeq(room, created)
+          return true
         })
+        if (added) ctx.deps.onRoomChanged?.(uid, event.workspaceId)
       } else {
         await ctx.deps.followUpStore.updateSource(uid, event.workspaceId, "schedule", event.scheduleId, () => sub.state, state => {
           state.scheduleTitle = event.scheduleTitle
@@ -492,6 +503,7 @@ export async function processSchedulePrivateEvent(
         evidenceAvailability: event.sessionId ? "available" : "restricted",
         createdAt: event.startedAt ?? now, updatedAt: now,
       })
+      ctx.deps.onRoomChanged?.(uid, event.workspaceId)
       if (event.sessionId) {
         await ctx.syncScheduleSessionRequests?.(event.sessionId)
       }
@@ -535,6 +547,7 @@ export async function processSchedulePrivateEvent(
         createdAt: event.startedAt ?? now, updatedAt: now,
       })
       ctx.metrics.quietRuns += 1
+      ctx.deps.onRoomChanged?.(uid, event.workspaceId)
       continue
     }
 
@@ -736,6 +749,7 @@ export async function processSchedulePrivateEvent(
       ticketId: linkedTicketId, messageId: deliveredMessageId, reason: triage.reason,
       createdAt: now, updatedAt: now,
     })
+    ctx.deps.onRoomChanged?.(uid, event.workspaceId)
     if (event.sessionId) {
       await ctx.syncScheduleSessionRequests?.(event.sessionId)
     }

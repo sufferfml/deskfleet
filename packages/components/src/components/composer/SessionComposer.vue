@@ -336,6 +336,16 @@ watch(attachments, items => {
 
 function itemPreview(item: ComposerAttachment): PreviewDescriptor | undefined {
   if (item.kind === "pasted_text" || item.kind === "github") return undefined
+  if (item.kind === "stored_workspace") {
+    if (!item.previewDataUrl) return undefined
+    return {
+      kind: "image",
+      content: item.previewDataUrl,
+      title: item.name,
+      mimeType: item.name,
+      source: { sessionId: props.location?.session?.id, itemId: item.id },
+    }
+  }
   const content = item.kind === "image"
     ? `data:${item.mimeType};base64,${item.data}`
     : attachmentPreviewUrls.get(item.id) ?? (item.kind === "machine_file" ? item.uri : undefined)
@@ -409,6 +419,13 @@ function removeAttachment(id: string): void {
 }
 function attachmentLabel(item: ComposerAttachment): string {
   if (item.kind === "github") return githubReferenceLabel(item.item)
+  if (item.kind === "stored_workspace") {
+    return item.attachmentType === "image"
+      ? t("agent.image")
+      : item.attachmentType === "resource" && item.name === "text/plain"
+        ? t("composer.pastedText")
+        : item.name
+  }
   return item.kind === "pasted_text" ? (item.label ?? t("composer.pastedText")) : item.name
 }
 function previewAttachment(item: ComposerAttachment): void {
@@ -442,7 +459,14 @@ function keydown(event: KeyboardEvent): void {
   if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit() }
 }
 
-defineExpose({ focus: () => textarea.value?.focus() })
+defineExpose({
+  focus: (moveToEnd = false) => {
+    const el = textarea.value
+    if (!el) return
+    el.focus()
+    if (moveToEnd) el.setSelectionRange(el.value.length, el.value.length)
+  },
+})
 
 onBeforeUnmount(() => {
   yoloConfirmation.cancel()
@@ -625,7 +649,7 @@ onBeforeUnmount(() => {
             @click="previewAttachment(item)"
           />
           <component :is="item.item.kind === 'issue' ? CircleDot : GitPullRequest" v-else-if="item.kind === 'github'" :size="14" class="shrink-0 text-ui-text-muted" aria-hidden="true" />
-          <FileText v-else-if="item.kind === 'pasted_text'" :size="14" class="shrink-0 text-ui-text-muted" aria-hidden="true" />
+          <FileText v-else-if="item.kind === 'pasted_text' || (item.kind === 'stored_workspace' && item.attachmentType === 'resource')" :size="14" class="shrink-0 text-ui-text-muted" aria-hidden="true" />
           <File v-else :size="14" class="shrink-0 text-ui-text-muted" :class="itemPreview(item) && 'cursor-zoom-in'" aria-hidden="true" @click="previewAttachment(item)" />
           <span
             class="min-w-0 truncate font-medium text-ui-text"
@@ -634,7 +658,7 @@ onBeforeUnmount(() => {
             @click="previewAttachment(item)"
           >{{ attachmentLabel(item) }}</span>
           <span v-if="item.kind === 'pasted_text'" class="shrink-0 rounded bg-ui-badge px-1.5 py-0.5 text-[11px] text-ui-text-muted">{{ t("composer.pastedTextLines", item.lines) }}</span>
-          <span v-else-if="item.kind !== 'github' && item.size !== undefined" class="shrink-0 text-[11px] tabular-nums text-ui-text-muted">{{ fileSize(item.size) }}</span>
+          <span v-else-if="item.kind !== 'github' && item.kind !== 'stored_workspace' && item.size !== undefined" class="shrink-0 text-[11px] tabular-nums text-ui-text-muted">{{ fileSize(item.size) }}</span>
           <button
             v-if="attachmentUpload(item)?.status === 'error'"
             type="button"

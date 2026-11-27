@@ -83,9 +83,9 @@ test("development installs disabled IPC without importing or creating the update
   expect(handle).toHaveBeenCalledWith(UPDATES_CHANNEL, expect.any(Function))
 })
 
-test("an independent workspace-agent build cannot install the upstream release", async () => {
+test.each(["DeskFleet Workspace Agent", "DeskFleet SA Preview"])("%s keeps upstream updates disabled", async name => {
   app.isPackaged = true
-  app.getName.mockReturnValue("DeskFleet Workspace Agent")
+  app.getName.mockReturnValue(name)
   expect(resolveDesktopInstallSource()).toBe("development")
   await installUpdates(lifecycle(), async () => {})
   expect(loadUpdater).not.toHaveBeenCalled()

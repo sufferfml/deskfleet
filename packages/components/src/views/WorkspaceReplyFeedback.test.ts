@@ -1069,3 +1069,66 @@ test("P2-28 live: a title-less tool status update on the live feed keeps the too
   applyFeedbackEvent(state, { type: "item_upsert", item: tool("Running tool", { activityStatus: "completed", status: "completed" }) }, 3, new Map())
   expect(state.items.get("tool:s:t:tc-pay")!.text).toBe("核对支付账单")
 })
+
+test("clicking a sent message quote for a feedback ack or milestone locates that exact feedback item by ID even with duplicate text", async () => {
+  const jobA = ticket("t-a", { title: "Task A", sessionId: "s-a" })
+  const jobB = ticket("t-b", { title: "Task B", sessionId: "s-b" })
+  const ctx = await mountWorkspace({
+    initial: room({
+      supportsReplyFeedback: true,
+      tickets: [jobA, jobB],
+      messages: [
+        message("req-1", { state: "assigned", ticketId: jobA.id, text: "First request" }),
+        message("disp-1", { role: "assistant", kind: "dispatch", sourceMessageId: "req-1", ticketId: jobA.id }),
+        message("req-2", { state: "assigned", ticketId: jobB.id, text: "Second request" }),
+        message("disp-2", { role: "assistant", kind: "dispatch", sourceMessageId: "req-2", ticketId: jobB.id }),
+        message("reply-ack-1", { state: "answered", text: "关于第一条受理", replyTo: "ack:req-1:0" }),
+        message("reply-ms-1", { state: "answered", text: "关于第一条阶段发现", replyTo: "milestone:req-1:m1" }),
+      ],
+      feedback: {
+        cursor: 4,
+        previewGeneration: "gen-quote-locate",
+        items: [
+          {
+            itemId: "ack:req-1:0", kind: "ack", sourceMessageId: "req-1", revision: 0, ticketId: jobA.id,
+            text: "已收到，开始排查。", status: "completed", seq: 1, createdAt: "t1", updatedAt: "t1",
+          },
+          {
+            itemId: "milestone:req-1:m1", kind: "milestone", sourceMessageId: "req-1", revision: 0, ticketId: jobA.id, sessionId: "s-a",
+            text: "根因已确认。", status: "completed", seq: 2, createdAt: "t2", updatedAt: "t2",
+          },
+          {
+            itemId: "ack:req-2:0", kind: "ack", sourceMessageId: "req-2", revision: 0, ticketId: jobB.id,
+            text: "已收到，开始排查。", status: "completed", seq: 3, createdAt: "t3", updatedAt: "t3",
+          },
+          {
+            itemId: "milestone:req-2:m2", kind: "milestone", sourceMessageId: "req-2", revision: 0, ticketId: jobB.id, sessionId: "s-b",
+            text: "根因已确认。", status: "completed", seq: 4, createdAt: "t4", updatedAt: "t4",
+          },
+        ],
+        processes: [],
+      },
+    }),
+  })
+
+  const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
+  const ack1 = ctx.wrapper.get('[data-feedback-ack="ack:req-1:0"]')
+  const ack2 = ctx.wrapper.get('[data-feedback-ack="ack:req-2:0"]')
+  const ms1 = ctx.wrapper.get('[data-feedback-milestone="milestone:req-1:m1"]')
+  const ms2 = ctx.wrapper.get('[data-feedback-milestone="milestone:req-2:m2"]')
+
+  await ctx.wrapper.get('[data-super-message="reply-ack-1"] button[data-reply-quote-target]').trigger("click")
+  await flushPromises()
+  expect(scroll).toHaveBeenCalledTimes(1)
+  expect(scroll.mock.contexts[0]).toBe(ack1.element)
+  expect(ack1.attributes("data-conversation-located")).toBe("true")
+  expect(ack2.attributes("data-conversation-located")).toBeUndefined()
+
+  await ctx.wrapper.get('[data-super-message="reply-ms-1"] button[data-reply-quote-target]').trigger("click")
+  await flushPromises()
+  expect(scroll).toHaveBeenCalledTimes(2)
+  expect(scroll.mock.contexts[1]).toBe(ms1.element)
+  expect(ms1.attributes("data-conversation-located")).toBe("true")
+  expect(ms2.attributes("data-conversation-located")).toBeUndefined()
+  expect(ack1.attributes("data-conversation-located")).toBeUndefined()
+})

@@ -1,5 +1,6 @@
 import type { AgentSessionRecord } from "@deskfleet/protocol/agent"
 import { superTaskText, type StoredSuperMessage, type SuperRoom } from "./state.ts"
+import { resolveRoomMessageLinks } from "./message-links.ts"
 import { adhdReplyInstructions } from "../agent/adhd-skill.ts"
 import type { SuperWorkspace } from "@deskfleet/protocol/super-agent"
 import { basename, dirname } from "node:path"
@@ -46,11 +47,11 @@ export interface SuperRouteContext {
   clientTimeZone?: string
   text: string
   attachments?: SuperAttachmentContext
-  quote?: { text: string; ticketId?: string }
+  quote?: { messageId?: string; sourceMessageId?: string; text: string; ticketId?: string; ticketIds?: string[] }
   focusTicketId?: string
   recentTicketIds?: string[]
   pendingQuestion?: { ticketId: string; options: string[]; optionDisposition?: "continue" }
-  recent: { role: "user" | "assistant" | "worker"; text: string; ticketId?: string }[]
+  recent: { id?: string; role: "user" | "assistant" | "worker"; text: string; ticketId?: string; ticketIds?: string[]; sourceMessageId?: string; replyTo?: string }[]
   tickets: SuperRouteTicket[]
   workspaces: { id: string; name: string; rootCount?: number; folderHint?: string }[]
   history?: { id: string; title: string; archiveState?: string }[]
@@ -60,7 +61,7 @@ export interface SuperRouteContext {
 }
 export type SuperRouteAction =
   | { kind: "answer" | "clarify"; text: string; ticketId?: string; options?: string[]; optionDisposition?: "continue" }
-  | { kind: "create"; title: string; scope: string; prompt: string; ticketId?: string; sessionId?: string; provider?: string; context?: "directory" }
+  | { kind: "create"; title: string; scope: string; prompt: string; ticketId?: string; sessionId?: string; provider?: string; context?: "directory"; quoteRole?: "source" | "background"; sourceDiscussionMessageIds?: string[] }
   | { kind: "continue"; ticketId: string; prompt: string; acceptanceUpdate?: string; delivery?: "backlog" | "steer"; resumeStopped?: boolean }
   | { kind: "stop"; ticketId: string; prompt: string }
   | { kind: "handoff"; workspaceId: string; prompt: string; context: string }
@@ -195,7 +196,27 @@ function parseAction(value: unknown, ctx: SuperRouteContext, readSessions: Set<s
       if (sessionId && !readSessions.has(sessionId)) throw new Error("Read the history evidence before attaching this session")
       const provider = obj.provider === undefined ? undefined : known(obj.provider, ctx.providers ?? [], "provider")
       if (obj.context !== undefined && obj.context !== "directory") throw new Error("Unknown execution context")
-      return { kind: "create", context: obj.context, title: string(obj.title, "title", 200), scope: string(obj.scope, "scope", 6000), prompt: string(obj.prompt, "worker prompt"), ticketId, sessionId, provider }
+      if (obj.quoteRole !== undefined && obj.quoteRole !== "source" && obj.quoteRole !== "background") throw new Error("Unknown quote role")
+      let sourceDiscussionMessageIds: string[] | undefined
+      if (obj.sourceDiscussionMessageIds !== undefined) {
+        if (!Array.isArray(obj.sourceDiscussionMessageIds) || obj.sourceDiscussionMessageIds.length > 12) throw new Error("Invalid sourceDiscussionMessageIds")
+        const knownDiscussionIds = new Set<string>([
+          ...ctx.recent.flatMap(item => item.id ? [item.id] : []),
+          ...(ctx.quote?.messageId ? [ctx.quote.messageId] : []),
+          ...(ctx.quote?.sourceMessageId ? [ctx.quote.sourceMessageId] : []),
+        ])
+        sourceDiscussionMessageIds = []
+        for (const rawId of obj.sourceDiscussionMessageIds) {
+          const messageId = string(rawId, "source discussion message", 512)
+          if (!knownDiscussionIds.has(messageId)) throw new Error("Unknown source discussion message")
+          if (!sourceDiscussionMessageIds.includes(messageId)) sourceDiscussionMessageIds.push(messageId)
+        }
+      }
+      return {
+        kind: "create", context: obj.context, title: string(obj.title, "title", 200), scope: string(obj.scope, "scope", 6000), prompt: string(obj.prompt, "worker prompt"), ticketId, sessionId, provider,
+        ...(obj.quoteRole !== undefined ? { quoteRole: obj.quoteRole } : {}),
+        ...(sourceDiscussionMessageIds !== undefined ? { sourceDiscussionMessageIds } : {}),
+      }
     }
     case "continue": {
       if (!ticketId) throw new Error("Continuation requires a ticket")
@@ -446,9 +467,15 @@ export function frontendContext(
   const archived = new Set(room.tickets.filter(ticket => ticket.archiveState).map(ticket => ticket.id))
   const archivedWorkers = new Set(room.tickets.filter(ticket => ticket.archiveState).map(ticket => ticket.sessionId))
   const limit = room.messages.findIndex(item => item.id === message.id)
+  const superseded = new Set(
+    room.messages
+      .slice(0, limit + 1)
+      .flatMap(item => item.role === "user" && item.reEditOf && item.reEditOf !== item.id ? [item.reEditOf] : []),
+  )
   // A second window can append its user message while the previous route is still pending.
   // Include replies to preceding user messages even if their rows were appended after this one.
-  const preceding = room.messages.slice(0, limit).filter(item => item.role === "user").slice(-12)
+  // Superseded stopped turns stay in history for inspection, never as pending foreground context.
+  const preceding = room.messages.slice(0, limit).filter(item => item.role === "user" && !superseded.has(item.id)).slice(-12)
   const replies = new Map<string, StoredSuperMessage[]>(preceding.map(item => [item.id, []]))
   for (const item of room.messages) {
     if (item.role === "assistant" && item.sourceMessageId) replies.get(item.sourceMessageId)?.push(item)
@@ -467,13 +494,19 @@ export function frontendContext(
     const folderHint = duplicates.has(name) && root ? [basename(dirname(root)), basename(root)].filter(Boolean).join("/") : undefined
     return { id, name, rootCount: roots.length, folderHint }
   })
+  const links = resolveRoomMessageLinks(room)
   return {
     workspaceId: room.workspaceId, clientTimeZone: message.clientTimeZone, text: superTaskText(message), adhdEnabled: message.adhdEnabled,
     quote: message.correctedTicketId ? { ticketId: message.correctedTicketId, text: "The user explicitly corrected the ownership of this message." }
-      : quoted ? { ticketId: quotedTicket, text: quoted.text }
+      : quoted ? { messageId: quoted.id, ...(quoted.sourceMessageId ? { sourceMessageId: quoted.sourceMessageId } : {}), ticketId: quotedTicket, ...(links[quoted.id]?.length ? { ticketIds: links[quoted.id] } : {}), text: quoted.text }
         : quotedFeedback ? { ticketId: quotedTicket, text: quotedFeedback.text } : undefined,
     focusTicketId: room.focusTicketId, recentTicketIds: room.recentTicketIds, pendingQuestion: room.pendingQuestion,
-    recent: [...recent.map(({ role, text, ticketId }) => ({ role, text, ticketId })), ...(message.context ? [{ role: "assistant" as const, text: message.context }] : [])],
+    recent: [...recent.map(({ id, role, text, ticketId, sourceMessageId, replyTo }) => ({
+      id, role, text, ticketId,
+      ...(sourceMessageId ? { sourceMessageId } : {}),
+      ...(replyTo ? { replyTo } : {}),
+      ...(links[id]?.length ? { ticketIds: links[id] } : {}),
+    })), ...(message.context ? [{ role: "assistant" as const, text: message.context }] : [])],
     tickets: room.tickets.filter(ticket => !ticket.archiveState).map(({ id, title, scope, latestAcceptance, status, summary, sessionId }) => ({ id, title, scope, latestAcceptance, status, summary, sessionId })),
     workspaces, providers,
     history: history.filter(session => !archivedWorkers.has(session.id)).map(({ id, title, archiveState }) => ({ id, title, archiveState })),

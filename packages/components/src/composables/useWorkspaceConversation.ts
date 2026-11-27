@@ -4,9 +4,9 @@ import { useI18n } from "vue-i18n"
 import type { DeskfleetDesktopApi, SuperFeedbackHandle } from "@deskfleet/client/desktop-api"
 import { parseWorkerReference } from "@deskfleet/client/worker-reference"
 import { adhdCommand } from "@deskfleet/protocol/adhd-command"
-import { archivedTicketError, superWorkerCommandName, type SuperMessage, type SuperSettings, type SuperSnapshot, type SuperWorkerCommandTarget, type SuperWorkspaceId } from "@deskfleet/protocol/super-agent"
+import { archivedTicketError, superWorkerCommandName, type SuperFeedbackPush, type SuperMessage, type SuperSettings, type SuperSnapshot, type SuperWorkerCommandTarget, type SuperWorkspaceId } from "@deskfleet/protocol/super-agent"
 import { useWorkspaceCommands } from "./useWorkspaceCommands.ts"
-import { workspacePromptAttachments, type ComposerAttachment } from "../services/composer-attachments.ts"
+import { createStoredWorkspaceAttachment, workspacePromptAttachments, workspaceReusedAttachments, type ComposerAttachment } from "../services/composer-attachments.ts"
 import { validComposerMentions, type ComposerMention } from "../services/composer-mentions.ts"
 import { githubReferenceLabel } from "../services/github-composer-reference.ts"
 import { missingWorker, type LocalWorkspaceStop, type WorkspaceReplyProgress, stoppableSteps } from "../services/workspace-message-timeline.ts"
@@ -17,16 +17,20 @@ import {
   buildRequestFeedbackMap,
   clearFeedbackState,
   createFeedbackState,
+  getLoadedProcess,
+  loadedProcessKey,
   mergeLoadedProcess,
+  setLoadedProcess,
   type WorkspaceRequestFeedback,
 } from "../services/workspace-feedback.ts"
-import { useWorkspaceAgentDrafts } from "../stores/workspace-agent-drafts.ts"
+import { useWorkspaceAgentDrafts, type StoredWorkspaceAttachmentDraft } from "../stores/workspace-agent-drafts.ts"
 
 /** The view is keyed by workspace. Late reads must never replace acknowledged mutations. */
 export function useWorkspaceConversation(
   api: NonNullable<DeskfleetDesktopApi["superAgent"]>, workspaceId: SuperWorkspaceId,
   followHandoff: (workspaceId: string) => void,
   offline: () => boolean = () => false,
+  onSnapshot?: (snapshot: SuperSnapshot) => void,
 ) {
   const { t } = useI18n()
   function messageOf(reason: unknown): string {
@@ -51,21 +55,213 @@ export function useWorkspaceConversation(
       : !items.some(item => item.reference.kind === "skill" && item.reference.id === selected.name)))) delete draft.selectedCommand
   }, { flush: "sync" })
   const plainOffer = ref<string>()
-  const draftKey = computed(() => JSON.stringify([draft.text.trim(), draft.replyTo, sentMentions.value]))
+  const draftKey = computed(() => JSON.stringify([draft.text.trim(), draft.replyTo, draft.reEdit?.sourceMessageId, sentMentions.value]))
   const canSendPlain = computed(() => plainOffer.value === draftKey.value)
   const key = JSON.stringify(workspaceId)
+  function attachmentDisplayLabel(item: ComposerAttachment): string | undefined {
+    if (item.kind === "github") return githubReferenceLabel(item.item)
+    if (item.kind === "pasted_text") return item.label
+    if (item.kind === "stored_workspace") {
+      return item.attachmentType === "image"
+        ? t("agent.image")
+        : item.attachmentType === "resource" && item.name === "text/plain"
+          ? t("composer.pastedText")
+          : item.name
+    }
+    return item.name
+  }
+  function extractStoredDrafts(items: readonly ComposerAttachment[]): StoredWorkspaceAttachmentDraft[] | undefined {
+    const stored: StoredWorkspaceAttachmentDraft[] = []
+    for (const item of items) {
+      if (item.kind !== "stored_workspace") continue
+      stored.push({
+        id: item.id,
+        sourceMessageId: item.sourceMessageId,
+        index: item.index,
+        attachmentType: item.attachmentType,
+        name: item.name,
+      })
+    }
+    return stored.length ? stored : undefined
+  }
+  if (draft.storedAttachments?.length) {
+    const existing = drafts.files[key] ?? []
+    const existingIds = new Set(existing.map(item => item.id))
+    const rehydrated = draft.storedAttachments
+      .filter(item => !existingIds.has(item.id))
+      .map(item => createStoredWorkspaceAttachment(item.sourceMessageId, item.index, { type: item.attachmentType, name: item.name }, item.id))
+    if (rehydrated.length) drafts.files[key] = [...existing, ...rehydrated]
+  }
   const missingAttachments = computed(() => (draft.attachmentLabels ?? []).filter(label => !drafts.files[key]?.some(item => item.id === label.id)))
   const attachments = computed<ComposerAttachment[]>({
     get: () => drafts.files[key] ?? [],
     set: items => {
       const missing = missingAttachments.value
       drafts.files[key] = items
-      draft.attachmentLabels = [...missing, ...items.map(item => ({ id: item.id, name: item.kind === "github" ? githubReferenceLabel(item.item) : item.kind === "pasted_text" ? item.label : item.name }))]
+      draft.attachmentLabels = [...missing, ...items.map(item => ({ id: item.id, name: attachmentDisplayLabel(item) }))]
+      const stored = extractStoredDrafts(items)
+      if (stored) draft.storedAttachments = stored
+      else delete draft.storedAttachments
     },
   })
   function discardMissing(id: string) {
     draft.attachmentLabels = draft.attachmentLabels?.filter(label => label.id !== id)
   }
+  function draftSignature(
+    textValue: string,
+    replyToValue: string | undefined,
+    mentionsList: readonly ComposerMention[],
+    items: readonly ComposerAttachment[],
+    missingLabels: readonly { id: string; name?: string }[],
+  ): string {
+    return JSON.stringify([
+      textValue,
+      replyToValue ?? null,
+      mentionsList,
+      items.map(item => item.kind === "stored_workspace"
+        ? ["stored", item.sourceMessageId, item.index, item.attachmentType, item.name]
+        : [item.kind, item.id]),
+      missingLabels.map(item => [item.id, item.name ?? null]),
+    ])
+  }
+  const hasExistingDraft = computed(() =>
+    Boolean(draft.text.trim())
+    || attachments.value.length > 0
+    || missingAttachments.value.length > 0
+    || Boolean(draft.replyTo)
+    || mentions.value.length > 0,
+  )
+  const reEdit = computed(() => draft.reEdit)
+  const hasStashedDraft = computed(() => Boolean(draft.stashedDraft || drafts.stashedFiles[key]?.length))
+  const isReEditModified = computed(() => {
+    if (!draft.reEdit) return false
+    return draftSignature(draft.text, draft.replyTo, mentions.value, attachments.value, missingAttachments.value) !== draft.reEdit.initialSignature
+  })
+  function stashCurrentDraft(): void {
+    const currentFiles = [...(drafts.files[key] ?? [])]
+    const currentLabels = draft.attachmentLabels?.map(item => ({ ...item }))
+    const currentStored = extractStoredDrafts(currentFiles)
+    draft.stashedDraft = {
+      text: draft.text,
+      ...(draft.replyTo ? { replyTo: draft.replyTo } : {}),
+      ...(draft.selectedCommand ? { selectedCommand: { ...draft.selectedCommand, target: { ...draft.selectedCommand.target } } } : {}),
+      ...(draft.mentions?.length ? { mentions: draft.mentions.map(item => ({ ...item, reference: { ...item.reference } })) } : {}),
+      ...(draft.pending ? { pending: structuredClone(draft.pending) } : {}),
+      ...(currentLabels?.length ? { attachmentLabels: currentLabels } : {}),
+      ...(currentStored?.length ? { storedAttachments: currentStored } : {}),
+    }
+    if (currentFiles.length) drafts.stashedFiles[key] = currentFiles
+    else delete drafts.stashedFiles[key]
+  }
+  function clearDraftContent(): void {
+    draft.text = ""
+    delete draft.replyTo
+    delete draft.mentions
+    delete draft.selectedCommand
+    delete draft.pending
+    delete draft.attachmentLabels
+    delete draft.storedAttachments
+    delete drafts.files[key]
+  }
+  function restoreStashedDraft(): boolean {
+    const stashed = draft.stashedDraft
+    const stashedAttachmentFiles = drafts.stashedFiles[key]
+    delete draft.stashedDraft
+    delete drafts.stashedFiles[key]
+    if (!stashed && !stashedAttachmentFiles?.length) return false
+    draft.text = stashed?.text ?? ""
+    if (stashed?.replyTo) draft.replyTo = stashed.replyTo
+    else delete draft.replyTo
+    if (stashed?.mentions?.length) draft.mentions = stashed.mentions.map(item => ({ ...item, reference: { ...item.reference } }))
+    else delete draft.mentions
+    if (stashed?.selectedCommand) draft.selectedCommand = { ...stashed.selectedCommand, target: { ...stashed.selectedCommand.target } }
+    else delete draft.selectedCommand
+    if (stashed?.pending) draft.pending = structuredClone(stashed.pending)
+    else delete draft.pending
+    const restoredFiles = stashedAttachmentFiles?.length
+      ? [...stashedAttachmentFiles]
+      : (stashed?.storedAttachments ?? []).map(item =>
+          createStoredWorkspaceAttachment(item.sourceMessageId, item.index, { type: item.attachmentType, name: item.name }, item.id))
+    if (restoredFiles.length) drafts.files[key] = restoredFiles
+    else delete drafts.files[key]
+    if (stashed?.attachmentLabels?.length) draft.attachmentLabels = stashed.attachmentLabels.map(item => ({ ...item }))
+    else if (restoredFiles.length) draft.attachmentLabels = restoredFiles.map(item => ({ id: item.id, name: attachmentDisplayLabel(item) }))
+    else delete draft.attachmentLabels
+    const stored = extractStoredDrafts(restoredFiles)
+    if (stored?.length) draft.storedAttachments = stored
+    else delete draft.storedAttachments
+    return true
+  }
+  function beginReEdit(source: SuperMessage, options?: { stashCurrent?: boolean }): void {
+    if (source.role !== "user") return
+    if (draft.reEdit?.sourceMessageId === source.id) return
+    const preserveExistingStash = Boolean(draft.reEdit && !isReEditModified.value && hasStashedDraft.value)
+    if (options?.stashCurrent && !preserveExistingStash && hasExistingDraft.value) {
+      stashCurrentDraft()
+    }
+    const restoredAttachments = (source.attachments ?? []).map((item, index) =>
+      createStoredWorkspaceAttachment(source.id, index, item))
+    const restoredMentions = source.mentions?.map(item => ({ ...item, reference: { ...item.reference } })) ?? []
+    draft.text = source.text
+    if (source.replyTo) draft.replyTo = source.replyTo
+    else delete draft.replyTo
+    if (restoredMentions.length) draft.mentions = restoredMentions
+    else delete draft.mentions
+    delete draft.selectedCommand
+    delete draft.pending
+    if (restoredAttachments.length) {
+      drafts.files[key] = restoredAttachments
+      draft.attachmentLabels = restoredAttachments.map(item => ({ id: item.id, name: attachmentDisplayLabel(item) }))
+      draft.storedAttachments = extractStoredDrafts(restoredAttachments)
+    } else {
+      delete drafts.files[key]
+      delete draft.attachmentLabels
+      delete draft.storedAttachments
+    }
+    actionError.value = ""
+    draft.reEdit = {
+      sourceMessageId: source.id,
+      initialSignature: draftSignature(draft.text, draft.replyTo, restoredMentions, restoredAttachments, []),
+      ...(hasStashedDraft.value ? { hasStashedDraft: true } : {}),
+    }
+  }
+  function hydrateReEditImagePreview(sourceMessageId: string, index: number, previewDataUrl: string): void {
+    const current = drafts.files[key]
+    if (!current?.length) return
+    let changed = false
+    const next = current.map(item => {
+      if (item.kind !== "stored_workspace" || item.sourceMessageId !== sourceMessageId || item.index !== index) return item
+      if (item.previewDataUrl === previewDataUrl) return item
+      changed = true
+      return { ...item, previewDataUrl }
+    })
+    if (changed) drafts.files[key] = next
+  }
+  function cancelReEdit(mode: "auto" | "restore-stashed" | "keep-as-draft" = "auto"): void {
+    if (!draft.reEdit) return
+    if (mode === "keep-as-draft") {
+      if (draft.pending?.reEditOf) delete draft.pending
+      delete draft.reEdit
+      delete draft.stashedDraft
+      delete drafts.stashedFiles[key]
+      return
+    }
+    if (mode === "restore-stashed") {
+      delete draft.reEdit
+      if (!restoreStashedDraft()) clearDraftContent()
+      return
+    }
+    if (!isReEditModified.value) {
+      delete draft.reEdit
+      if (!restoreStashedDraft()) clearDraftContent()
+      return
+    }
+    if (draft.pending?.reEditOf) delete draft.pending
+    delete draft.reEdit
+  }
+  const manuallyFoldedIds = computed(() => new Set(drafts.foldedTurnIds(workspaceId)))
+  function foldStoppedTurn(messageId: string): void { drafts.foldTurn(workspaceId, messageId) }
+  function unfoldStoppedTurn(messageId: string): void { drafts.unfoldTurn(workspaceId, messageId) }
   const readingError = ref("")
   const actionError = ref("")
   const sending = ref(false)
@@ -78,6 +274,11 @@ export function useWorkspaceConversation(
   let active = true
   let generation = 0
   let reading = false
+  let refreshPending = false
+  let resyncPending = false
+  let bufferedPushes: SuperFeedbackPush[] = []
+  let processRequestSeq = 0
+  const activeProcessTokens = new Map<string, number>()
   let lastSentId: string | undefined
   let feedbackHandle: SuperFeedbackHandle | undefined
   let feedbackSubscriptionId: string | undefined
@@ -91,11 +292,26 @@ export function useWorkspaceConversation(
     }
     return map
   }
+  function requestRefresh() {
+    if (!active || offline()) return
+    if (reading || saving.value || sending.value) {
+      refreshPending = true
+      return
+    }
+    void refresh()
+  }
+  function flushPendingRefresh() {
+    if (!refreshPending || !active || offline() || reading || saving.value || sending.value) return
+    refreshPending = false
+    void refresh()
+  }
   async function closeFeedbackSubscription() {
     feedbackEpoch++
     feedbackSubscribing = false
     feedbackConnected.value = false
     feedbackSubscriptionId = undefined
+    resyncPending = false
+    bufferedPushes = []
     const handle = feedbackHandle
     feedbackHandle = undefined
     if (handle) await handle.unsubscribe()
@@ -116,15 +332,33 @@ export function useWorkspaceConversation(
         },
         push => {
           if (!active || epoch !== feedbackEpoch) return
+          if (resyncPending) {
+            if (push.workspaceId === workspaceId && feedbackSubscriptionId && push.subscriptionId === feedbackSubscriptionId) {
+              bufferedPushes.push(push)
+              if (bufferedPushes.length > 256) bufferedPushes.splice(0, bufferedPushes.length - 256)
+            }
+            return
+          }
           const outcome = applyFeedbackPush(feedbackState, push, workspaceId, feedbackSubscriptionId, currentRevisions())
           if (outcome.changed) feedbackVersion.value++
-          if (outcome.resyncRequired || outcome.snapshotDirty) void refresh()
+          if (outcome.resyncRequired) {
+            resyncPending = true
+            bufferedPushes = []
+            if (push.workspaceId === workspaceId && feedbackSubscriptionId && push.subscriptionId === feedbackSubscriptionId) {
+              bufferedPushes.push(push)
+            }
+            requestRefresh()
+          } else if (outcome.snapshotDirty) {
+            requestRefresh()
+          }
         },
         () => {
           if (epoch !== feedbackEpoch) return
           feedbackHandle = undefined
           feedbackSubscriptionId = undefined
           feedbackConnected.value = false
+          resyncPending = false
+          bufferedPushes = []
         },
       )
       if (!active || epoch !== feedbackEpoch || offline() || isHidden() || !snapshot.value?.supportsReplyFeedback) {
@@ -135,24 +369,35 @@ export function useWorkspaceConversation(
       feedbackSubscriptionId = handle.initial.subscriptionId
       feedbackConnected.value = true
       if (handle.initial.resyncRequired) {
-        feedbackState.previewGeneration = handle.initial.previewGeneration
-        void refresh()
+        // Do NOT overwrite previewGeneration before the replacement snapshot arrives:
+        // let the next snapshot replace generation, cursor (even if smaller), and old previews atomically.
+        resyncPending = true
+        bufferedPushes = []
+        requestRefresh()
         return
       }
       const revisions = currentRevisions()
       let dirty = false
       let changed = false
+      let needsResync = false
       for (const entry of handle.initial.events) {
         if (entry.cursor <= feedbackState.cursor) continue
         feedbackState.cursor = entry.cursor
         const outcome = applyFeedbackEvent(feedbackState, entry.event, entry.cursor, revisions)
         if (outcome.changed) changed = true
-        if (outcome.resyncRequired || outcome.snapshotDirty) dirty = true
+        if (outcome.resyncRequired) needsResync = true
+        if (outcome.snapshotDirty) dirty = true
       }
       feedbackState.cursor = Math.max(feedbackState.cursor, handle.initial.cursor)
       feedbackState.previewGeneration = handle.initial.previewGeneration
       if (changed) feedbackVersion.value++
-      if (dirty) void refresh()
+      if (needsResync) {
+        resyncPending = true
+        bufferedPushes = []
+        requestRefresh()
+      } else if (dirty) {
+        requestRefresh()
+      }
     } catch {
       if (epoch === feedbackEpoch) feedbackConnected.value = false
     } finally {
@@ -162,11 +407,18 @@ export function useWorkspaceConversation(
   async function loadProcess(sourceMessageId: string, append = false) {
     const fetchProcess = api.feedbackProcess
     if (!active || !fetchProcess || !snapshot.value?.supportsReplyFeedback || offline()) return
-    const existing = feedbackState.loadedProcesses.get(sourceMessageId)
-    if (existing?.loading) return
     const revision = currentRevisions().get(sourceMessageId) ?? 0
-    feedbackState.loadedProcesses.set(sourceMessageId, {
-      revision,
+    const procKey = loadedProcessKey(sourceMessageId, revision)
+    const existing = getLoadedProcess(feedbackState, sourceMessageId, revision)
+    if (existing?.loading) return
+    const token = ++processRequestSeq
+    activeProcessTokens.set(procKey, token)
+    const isCurrent = () =>
+      active
+      && snapshot.value?.workspaceId === workspaceId
+      && (currentRevisions().get(sourceMessageId) ?? 0) === revision
+      && activeProcessTokens.get(procKey) === token
+    setLoadedProcess(feedbackState, sourceMessageId, revision, {
       items: existing?.items ?? [],
       hasMore: existing?.hasMore ?? false,
       nextAfterSeq: existing?.nextAfterSeq,
@@ -179,14 +431,13 @@ export function useWorkspaceConversation(
         sourceMessageId,
         ...(append && existing?.nextAfterSeq ? { afterSeq: existing.nextAfterSeq } : {}),
       })
-      if (!active || snapshot.value?.workspaceId !== workspaceId) return
+      if (!isCurrent() || result.revision !== revision) return
       mergeLoadedProcess(feedbackState, result, append)
       feedbackVersion.value++
     } catch (reason) {
-      if (!active) return
-      const prior = feedbackState.loadedProcesses.get(sourceMessageId)
-      feedbackState.loadedProcesses.set(sourceMessageId, {
-        revision,
+      if (!isCurrent()) return
+      const prior = getLoadedProcess(feedbackState, sourceMessageId, revision)
+      setLoadedProcess(feedbackState, sourceMessageId, revision, {
         items: prior?.items ?? [],
         hasMore: prior?.hasMore ?? false,
         nextAfterSeq: prior?.nextAfterSeq,
@@ -194,6 +445,8 @@ export function useWorkspaceConversation(
         error: messageOf(reason),
       })
       feedbackVersion.value++
+    } finally {
+      if (activeProcessTokens.get(procKey) === token) activeProcessTokens.delete(procKey)
     }
   }
   const feedbackMap = computed<Map<string, WorkspaceRequestFeedback>>(() => {
@@ -206,8 +459,34 @@ export function useWorkspaceConversation(
     if (!active || value.workspaceId !== workspaceId) return
     snapshot.value = value
     readingError.value = ""
-    applySnapshotFeedback(feedbackState, value)
+    const replacing = resyncPending
+    applySnapshotFeedback(feedbackState, value, { replace: replacing })
+    if (replacing) {
+      resyncPending = false
+      const queued = bufferedPushes.sort((a, b) => a.cursor - b.cursor)
+      bufferedPushes = []
+      const revisions = currentRevisions()
+      let dirtyAfterReplay = false
+      let resyncAfterReplay = false
+      for (const push of queued) {
+        if (push.previewGeneration !== feedbackState.previewGeneration) continue
+        if (push.cursor <= feedbackState.cursor) continue
+        const outcome = applyFeedbackPush(feedbackState, push, workspaceId, feedbackSubscriptionId, revisions)
+        if (outcome.resyncRequired) {
+          resyncAfterReplay = true
+          break
+        }
+        if (outcome.snapshotDirty) dirtyAfterReplay = true
+      }
+      if (resyncAfterReplay) {
+        resyncPending = true
+        requestRefresh()
+      } else if (dirtyAfterReplay) {
+        requestRefresh()
+      }
+    }
     feedbackVersion.value++
+    onSnapshot?.(value)
     if (value.supportsReplyFeedback && api.subscribeFeedback && !offline() && visible.value !== "hidden") {
       void ensureFeedbackSubscription()
     } else if (!value.supportsReplyFeedback && feedbackHandle) {
@@ -224,18 +503,40 @@ export function useWorkspaceConversation(
       const submitted = pending.attachmentIds ?? []
       const current = draft.attachmentLabels ?? []
       const sameAttachments = current.length === submitted.length && current.every((item, index) => item.id === submitted[index])
-      if (draft.text.trim() === pending.text && draft.replyTo === pending.replyTo && sameAttachments && JSON.stringify(sentMentions.value) === JSON.stringify(pending.mentions ?? [])) {
-        draft.text = ""
-        delete draft.mentions
-        delete draft.selectedCommand
-        delete draft.replyTo
+      const sameReEdit = draft.reEdit?.sourceMessageId === pending.reEditOf
+      if (draft.text.trim() === pending.text && draft.replyTo === pending.replyTo && sameReEdit && sameAttachments && JSON.stringify(sentMentions.value) === JSON.stringify(pending.mentions ?? [])) {
+        if (pending.reEditOf) {
+          delete draft.reEdit
+          if (!restoreStashedDraft()) clearDraftContent()
+          actionError.value = ""
+        } else {
+          draft.text = ""
+          delete draft.mentions
+          delete draft.selectedCommand
+          delete draft.replyTo
+          if (submitted.length) {
+            const remaining = attachments.value.filter(item => !submitted.includes(item.id))
+            drafts.files[key] = remaining
+            draft.attachmentLabels = draft.attachmentLabels?.filter(label => !submitted.includes(label.id))
+            const stored = extractStoredDrafts(remaining)
+            if (stored) draft.storedAttachments = stored
+            else delete draft.storedAttachments
+          }
+          actionError.value = ""
+          delete draft.pending
+        }
+      } else {
+        if (submitted.length) {
+          const remaining = attachments.value.filter(item => !submitted.includes(item.id))
+          drafts.files[key] = remaining
+          draft.attachmentLabels = draft.attachmentLabels?.filter(label => !submitted.includes(label.id))
+          const stored = extractStoredDrafts(remaining)
+          if (stored) draft.storedAttachments = stored
+          else delete draft.storedAttachments
+        }
+        actionError.value = ""
+        delete draft.pending
       }
-      if (submitted.length) {
-        drafts.files[key] = attachments.value.filter(item => !submitted.includes(item.id))
-        draft.attachmentLabels = draft.attachmentLabels?.filter(label => !submitted.includes(label.id))
-      }
-      actionError.value = ""
-      delete draft.pending
     }
     const transfer = lastSentId && value.messages.find(message => message.id === lastSentId)
     if (transfer && transfer.state === "transferred" && transfer.targetWorkspaceId && visible.value !== "hidden") {
@@ -244,7 +545,12 @@ export function useWorkspaceConversation(
     }
   }
   async function refresh() {
-    if (offline() || reading || saving.value || sending.value) return
+    if (!active || offline()) return
+    if (reading || saving.value || sending.value) {
+      refreshPending = true
+      return
+    }
+    refreshPending = false
     const issued = generation
     reading = true
     try {
@@ -252,7 +558,10 @@ export function useWorkspaceConversation(
       if (active && generation === issued) accept(value)
     } catch (reason) {
       if (active && generation === issued) readingError.value = messageOf(reason)
-    } finally { reading = false }
+    } finally {
+      reading = false
+      flushPendingRefresh()
+    }
   }
   let pollTicks = 0
   const polling = useIntervalFn(() => {
@@ -263,6 +572,7 @@ export function useWorkspaceConversation(
   }, 2000, { immediate: false })
   watch([visible, offline], ([current, disconnected]) => {
     if (disconnected || current === "hidden") {
+      refreshPending = false
       polling.pause()
       void closeFeedbackSubscription()
     } else {
@@ -272,6 +582,10 @@ export function useWorkspaceConversation(
   }, { immediate: true })
   onScopeDispose(() => {
     active = false
+    refreshPending = false
+    resyncPending = false
+    bufferedPushes = []
+    activeProcessTokens.clear()
     clearFeedbackState(feedbackState)
     void closeFeedbackSubscription()
   })
@@ -299,14 +613,19 @@ export function useWorkspaceConversation(
   async function send(asPlain = false) {
     const text = draft.text.trim()
     const replyTo = draft.replyTo
+    const reEditOf = draft.reEdit?.sourceMessageId
     const items = attachments.value
+    const reused = workspaceReusedAttachments(items)
+    const newBlocks = workspacePromptAttachments(items)
     const references = sentMentions.value
     if (offline() || (!text && !items.length) || sending.value || saving.value || !snapshot.value || missingAttachments.value.length) return
     if (items.length && !snapshot.value.supportsAttachments) return
     if (asPlain && !canSendPlain.value) return
     const ids = items.map(item => item.id)
     const pending = draft.pending
-    const matches = pending?.text === text && pending.replyTo === replyTo && JSON.stringify(pending.mentions ?? []) === JSON.stringify(references)
+    const matches = pending?.text === text && pending.replyTo === replyTo && pending.reEditOf === reEditOf
+      && JSON.stringify(pending.reusedAttachments ?? []) === JSON.stringify(reused)
+      && JSON.stringify(pending.mentions ?? []) === JSON.stringify(references)
       && (pending.attachmentIds?.length ?? 0) === ids.length && ids.every((id, i) => id === pending.attachmentIds?.[i])
     plainOffer.value = undefined
     sending.value = true
@@ -338,15 +657,26 @@ export function useWorkspaceConversation(
       const clientTimeZone = snapshot.value?.supportsScheduleCommands
         ? Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
         : undefined
-      const request = { workspaceId, messageId: matches ? pending.messageId : crypto.randomUUID(), text, ...(replyTo && { replyTo }),
-        ...(command && { command }), ...(references.length && { mentions: references }),
-        ...(clientTimeZone && { timeZone: clientTimeZone }) }
+      const request = {
+        workspaceId,
+        messageId: matches ? pending.messageId : crypto.randomUUID(),
+        text,
+        ...(replyTo && { replyTo }),
+        ...(reEditOf && { reEditOf }),
+        ...(reused.length && { reusedAttachments: reused }),
+        ...(command && { command }),
+        ...(references.length && { mentions: references }),
+        ...(clientTimeZone && { timeZone: clientTimeZone }),
+      }
       draft.pending = { ...request, ...(ids.length ? { attachmentIds: ids } : {}) }
       lastSentId = request.messageId
-      accept(await api.send({ ...request, ...(items.length ? { attachments: workspacePromptAttachments(items) } : {}) }))
+      accept(await api.send({ ...request, ...(newBlocks.length ? { attachments: newBlocks } : {}) }))
     }
     catch (reason) { if (active) actionError.value = messageOf(reason) }
-    finally { sending.value = false }
+    finally {
+      sending.value = false
+      flushPendingRefresh()
+    }
   }
   async function change(operation: () => Promise<SuperSnapshot>, reportError: boolean | "dialog" = true) {
     if (offline() || saving.value || sending.value) {
@@ -362,7 +692,10 @@ export function useWorkspaceConversation(
       if (active && reportError) actionError.value = messageOf(reason)
       return false
     }
-    finally { saving.value = false }
+    finally {
+      saving.value = false
+      flushPendingRefresh()
+    }
   }
   async function stop(progress: WorkspaceReplyProgress, ticketId?: string) {
     const command = api.stop
@@ -380,6 +713,8 @@ export function useWorkspaceConversation(
   }
   return {
     stop, localStops, feedbackMap, feedbackConnected, loadProcess,
+    hasExistingDraft, reEdit, hasStashedDraft, isReEditModified, beginReEdit, hydrateReEditImagePreview, cancelReEdit,
+    manuallyFoldedIds, foldStoppedTurn, unfoldStoppedTurn,
     archiveTicket: async (ticketId: string, sessionId: string | null, archived: boolean, operationId: string) => {
       const archive = api.archiveTicket
       if (!archive || !snapshot.value?.supportsTicketArchive) throw new Error(t("superAgent.archiveUnavailable"))
@@ -391,6 +726,8 @@ export function useWorkspaceConversation(
       return api.send({ workspaceId, messageId: message.id, text: message.text, replyTo: message.replyTo, ...(message.command && { command: message.command }), ...(message.mentions?.length && { mentions: message.mentions }), retry: true })
     }),
     correct: (messageId: string, ticketId: string) => change(() => api.correct({ workspaceId, messageId, ticketId })),
+    linkMessage: (messageId: string, ticketIds: string[]) => api.linkMessage ? change(() => api.linkMessage!({ workspaceId, messageId, ticketIds })) : Promise.resolve(false),
+    createTicket: (messageId: string, title: string, scope?: string) => api.createTicket ? change(() => api.createTicket!({ workspaceId, messageId, title, ...(scope ? { scope } : {}) })) : Promise.resolve(false),
     saveSettings: (settings: Omit<SuperSettings, "workspaceId">) => change(() => api.settings({ ...settings, workspaceId })),
   }
 }

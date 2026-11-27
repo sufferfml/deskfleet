@@ -1,4 +1,4 @@
-import type { SuperCoordinatorPhase, SuperMessage, SuperTicket } from "@deskfleet/protocol/super-agent"
+import { isConfirmedStoppedTurn, messageMatchesTicketFocus, resolveCanonicalMessageTicketIds, resolveSupersededStoppedTurns, type SuperCoordinatorPhase, type SuperMessage, type SuperMessageTicketLinks, type SuperTicket } from "@deskfleet/protocol/super-agent"
 import type { WorkspaceRequestFeedback } from "./workspace-feedback.ts"
 
 const legacyMissingWorker = "No configured worker provider is available for this ticket."
@@ -39,8 +39,10 @@ export function workspaceMessageRows(
   tickets: Map<string, SuperTicket>,
   localStops?: Map<string, LocalWorkspaceStop>,
   feedbackMap?: Map<string, WorkspaceRequestFeedback>,
+  messageTicketLinks?: Readonly<SuperMessageTicketLinks>,
 ) {
   const byId = new Map(messages.map(message => [message.id, message]))
+  const knownTicketIds = new Set(tickets.keys())
   const operations = new Set<string>()
   const dispatches = new Map<string, Map<string, Dispatch>>()
   const latestWorkerEvent = new Map<string, string>()
@@ -71,8 +73,17 @@ export function workspaceMessageRows(
     const jobs = [...(dispatches.get(message.id)?.values() ?? [])]
     const onlyJob = jobs.length === 1 ? jobs[0] : undefined
     const source = message.sourceMessageId ? byId.get(message.sourceMessageId) : undefined
-    const ticketId = message.ticketId ?? (message.role === "assistant" ? source?.ticketId : undefined)
-    const ticket = ticketId ? tickets.get(ticketId) : onlyJob?.ticket
+    const ticketIds = resolveCanonicalMessageTicketIds({
+      message,
+      snapshotLinks: messageTicketLinks,
+      sourceMessage: source,
+      dispatchTicketIds: jobs.map(job => job.ticket.id),
+      knownTicketIds,
+    })
+    const linkedTickets = ticketIds
+      .map(id => tickets.get(id))
+      .filter((item): item is SuperTicket => !!item)
+    const ticket = linkedTickets.length === 1 ? linkedTickets[0] : undefined
     const failed = message.state === "failed"
     const perTicketFailures = jobs.length > 1 && jobs.some(job => job.delivery)
     const workerMissing = failed && (missingWorker(message) || jobs.some(job => job.delivery && missingWorker(job.delivery)))
@@ -87,15 +98,252 @@ export function workspaceMessageRows(
       ? { sessionId: message.sessionId, turnId: message.turnId } : undefined
     const sessions = sessionLinks(message.sessionId ?? onlyJob?.delivery?.sessionId ?? onlyJob?.marker.sessionId ?? ticket?.sessionId, jobs)
     const feedback = message.role === "user" ? feedbackMap?.get(message.id) : undefined
-    return { message, fork, progress: progress.get(message.id), feedback, ticket, sessions, detailSummary, jobs, workerMissing, workerFailure, perTicketFailures }
+    return { message, fork, progress: progress.get(message.id), feedback, ticket, ticketIds, linkedTickets, sessions, detailSummary, jobs, workerMissing, workerFailure, perTicketFailures }
   })
 }
 
-type WorkspaceRow = ReturnType<typeof workspaceMessageRows>[number]
-interface TranscriptGroup {
+export type WorkspaceRow = ReturnType<typeof workspaceMessageRows>[number]
+
+/** Filter rendered SA rows strictly by the canonical per-row ticket association list (never by color slot). */
+export function filterWorkspaceRowsByTicket(rows: readonly WorkspaceRow[], focusedTicketId: string | undefined): WorkspaceRow[] {
+  if (!focusedTicketId) return [...rows]
+  return rows.filter(row => messageMatchesTicketFocus(row.ticketIds, focusedTicketId))
+}
+
+/** Narrow a multi-ticket request's live feedback items to the focused ticket without mutating underlying state. */
+export function filterFeedbackForFocusedTicket(
+  feedback: WorkspaceRequestFeedback | undefined,
+  focusedTicketId: string | undefined,
+): WorkspaceRequestFeedback | undefined {
+  if (!feedback || !focusedTicketId) return feedback
+  const ack = feedback.ack && (!feedback.ack.ticketId || feedback.ack.ticketId === focusedTicketId) ? feedback.ack : undefined
+  const milestones = feedback.milestones.filter(item => !item.ticketId || item.ticketId === focusedTicketId)
+  const finalPreviews = feedback.finalPreviews.filter(item => !item.ticketId || item.ticketId === focusedTicketId)
+  const activities = feedback.activities.filter(item => !item.ticketId || item.ticketId === focusedTicketId)
+  return { ...feedback, ack, milestones, finalPreviews, activities }
+}
+
+/** Narrow a multi-ticket request's progress steps to the focused ticket without mutating underlying state. */
+export function filterProgressForFocusedTicket(
+  progress: WorkspaceReplyProgress | undefined,
+  focusedTicketId: string | undefined,
+): WorkspaceReplyProgress | undefined {
+  if (!progress || !focusedTicketId) return progress
+  const steps = progress.steps.filter(step => !step.ticketId || step.ticketId === focusedTicketId)
+  if (!steps.length) return undefined
+  return { ...progress, steps }
+}
+
+export function previousUserMessageId(rows: readonly Pick<WorkspaceRow, "message">[], messageId: string): string | undefined {
+  const index = rows.findIndex(row => row.message.id === messageId)
+  if (index <= 0) return undefined
+  for (let i = index - 1; i >= 0; i--) {
+    const candidate = rows[i]!.message
+    if (candidate.role === "user") return candidate.id
+  }
+  return undefined
+}
+
+export interface TranscriptGroup {
   id: string
   approvals?: "recorded" | "handled"
   rows: WorkspaceRow[]
+}
+
+export interface StoppedTurnMeta {
+  sourceMessageId: string
+  supersededById?: string
+  actionAnchor: { kind: "progress" | "workerResult"; messageId: string }
+}
+
+export type TranscriptEntry =
+  | { kind: "group"; id: string; group: TranscriptGroup }
+  | {
+      kind: "foldedStoppedTurn"
+      id: string
+      reason: "superseded" | "manual"
+      revisedById?: string
+      rows: WorkspaceRow[]
+      groups: TranscriptGroup[]
+    }
+
+export type WorkspaceLocateTarget =
+  | { kind: "message"; id: string; approvalGroupId?: string; foldedTurnId?: string; foldedTurnReason?: "superseded" | "manual" }
+  | { kind: "feedback"; id: string; feedbackKind: "ack" | "milestone"; foldedTurnId?: string; foldedTurnReason?: "superseded" | "manual" }
+
+/**
+ * Identify confirmed-stopped user turns, their explicit re-edit superseding message (if any),
+ * and the single canonical UI anchor where "已停止" is rendered for each stopped turn.
+ */
+export function resolveWorkspaceStoppedTurns(
+  messages: readonly SuperMessage[],
+  rows: readonly WorkspaceRow[],
+  tickets: ReadonlyMap<string, SuperTicket>,
+  localStops?: ReadonlyMap<string, LocalWorkspaceStop>,
+): Map<string, StoppedTurnMeta> {
+  const superseded = resolveSupersededStoppedTurns(messages, tickets)
+  const progressRowBySource = new Map<string, WorkspaceRow>()
+  const stoppedWorkerResultBySource = new Map<string, string>()
+  for (const row of rows) {
+    if (row.progress) progressRowBySource.set(row.progress.sourceId, row)
+    if (
+      row.message.role === "worker"
+      && row.message.workerEvent === "result"
+      && row.message.stopState === "stopped"
+      && row.message.sourceMessageId
+    ) {
+      stoppedWorkerResultBySource.set(row.message.sourceMessageId, row.message.id)
+    }
+  }
+  const result = new Map<string, StoppedTurnMeta>()
+  for (const row of rows) {
+    if (row.message.role !== "user") continue
+    const local = localStops?.get(row.message.id)
+    const hasPendingLocalStop = !!local && local.revision === (row.message.revision ?? 0)
+    if (!isConfirmedStoppedTurn(messages, tickets, row.message.id, { hasPendingLocalStop })) continue
+    const progressRow = progressRowBySource.get(row.message.id)
+    const hasStoppedProgress = !!progressRow?.progress?.steps.length && progressRow.progress.steps.every(step => step.state === "stopped")
+    const workerResultId = stoppedWorkerResultBySource.get(row.message.id)
+    const actionAnchor = hasStoppedProgress
+      ? { kind: "progress" as const, messageId: progressRow.message.id }
+      : workerResultId
+        ? { kind: "workerResult" as const, messageId: workerResultId }
+        : undefined
+    if (!actionAnchor) continue
+    result.set(row.message.id, {
+      sourceMessageId: row.message.id,
+      ...(superseded.has(row.message.id) ? { supersededById: superseded.get(row.message.id) } : {}),
+      actionAnchor,
+    })
+  }
+  return result
+}
+
+function rowTurnId(row: WorkspaceRow): string | undefined {
+  if (row.message.role === "user") return row.message.id
+  return row.message.sourceMessageId
+}
+
+/**
+ * Fold superseded or manually-collapsed stopped turns strictly by real `sourceMessageId`
+ * association, preserving interleaved unrelated turns in place without swallowing them.
+ */
+export function buildWorkspaceTranscript(
+  displayedRows: readonly WorkspaceRow[],
+  stoppedTurns: ReadonlyMap<string, StoppedTurnMeta>,
+  manuallyFoldedIds: ReadonlySet<string>,
+): TranscriptEntry[] {
+  const foldedMeta = new Map<string, { reason: "superseded" | "manual"; revisedById?: string }>()
+  for (const [turnId, meta] of stoppedTurns) {
+    if (meta.supersededById) {
+      foldedMeta.set(turnId, { reason: "superseded", revisedById: meta.supersededById })
+    } else if (manuallyFoldedIds.has(turnId)) {
+      foldedMeta.set(turnId, { reason: "manual" })
+    }
+  }
+
+  const foldedRowsByTurn = new Map<string, WorkspaceRow[]>()
+  const unfoldedRows: WorkspaceRow[] = []
+  for (const row of displayedRows) {
+    const turnId = rowTurnId(row)
+    if (turnId && foldedMeta.has(turnId)) {
+      let bucket = foldedRowsByTurn.get(turnId)
+      if (!bucket) foldedRowsByTurn.set(turnId, bucket = [])
+      bucket.push(row)
+    } else {
+      unfoldedRows.push(row)
+    }
+  }
+
+  const unfoldedGroups = groupWorkspaceApprovals(unfoldedRows)
+  const groupByMessageId = new Map<string, TranscriptGroup>()
+  for (const group of unfoldedGroups) {
+    for (const row of group.rows) groupByMessageId.set(row.message.id, group)
+  }
+
+  const entries: TranscriptEntry[] = []
+  const emittedFolded = new Set<string>()
+  const emittedGroups = new Set<string>()
+  for (const row of displayedRows) {
+    const turnId = rowTurnId(row)
+    if (turnId && foldedMeta.has(turnId)) {
+      if (emittedFolded.has(turnId)) continue
+      emittedFolded.add(turnId)
+      const meta = foldedMeta.get(turnId)!
+      const turnRows = foldedRowsByTurn.get(turnId) ?? []
+      entries.push({
+        kind: "foldedStoppedTurn",
+        id: turnId,
+        reason: meta.reason,
+        ...(meta.revisedById ? { revisedById: meta.revisedById } : {}),
+        rows: turnRows,
+        groups: groupWorkspaceApprovals(turnRows),
+      })
+      continue
+    }
+    const group = groupByMessageId.get(row.message.id)
+    if (!group || emittedGroups.has(group.id)) continue
+    emittedGroups.add(group.id)
+    entries.push({ kind: "group", id: group.id, group })
+  }
+  return entries
+}
+
+function indexGroupLocateTargets(
+  groups: readonly TranscriptGroup[],
+  targets: Map<string, WorkspaceLocateTarget>,
+  folded?: { id: string; reason: "superseded" | "manual" },
+): void {
+  const extra = folded ? { foldedTurnId: folded.id, foldedTurnReason: folded.reason } : {}
+  for (const group of groups) {
+    const approvalGroupId = group.approvals ? group.id : undefined
+    for (const row of group.rows) {
+      targets.set(row.message.id, { kind: "message", id: row.message.id, approvalGroupId, ...extra })
+    }
+  }
+  for (const group of groups) {
+    const approvalGroupId = group.approvals ? group.id : undefined
+    for (const row of group.rows) {
+      for (const job of row.jobs) {
+        if (!targets.has(job.marker.id)) {
+          targets.set(job.marker.id, { kind: "message", id: row.message.id, approvalGroupId, ...extra })
+        }
+        if (job.delivery && !targets.has(job.delivery.id)) {
+          targets.set(job.delivery.id, { kind: "message", id: row.message.id, approvalGroupId, ...extra })
+        }
+      }
+      if (row.message.role === "user" && row.feedback) {
+        if (row.feedback.ack && !targets.has(row.feedback.ack.itemId)) {
+          targets.set(row.feedback.ack.itemId, { kind: "feedback", id: row.feedback.ack.itemId, feedbackKind: "ack", ...extra })
+        }
+        for (const milestone of row.feedback.milestones) {
+          if (!targets.has(milestone.itemId)) {
+            targets.set(milestone.itemId, { kind: "feedback", id: milestone.itemId, feedbackKind: "milestone", ...extra })
+          }
+        }
+      }
+    }
+  }
+}
+
+/** Map rendered message, folded dispatch marker, and feedback IDs to exact DOM locate targets. */
+export function indexWorkspaceLocateTargets(groups: readonly TranscriptGroup[]): Map<string, WorkspaceLocateTarget> {
+  const targets = new Map<string, WorkspaceLocateTarget>()
+  indexGroupLocateTargets(groups, targets)
+  return targets
+}
+
+/** Map all rendered transcript entries (including folded stopped turns) to exact DOM locate targets. */
+export function indexWorkspaceTranscriptLocateTargets(entries: readonly TranscriptEntry[]): Map<string, WorkspaceLocateTarget> {
+  const targets = new Map<string, WorkspaceLocateTarget>()
+  for (const entry of entries) {
+    if (entry.kind === "group") {
+      indexGroupLocateTargets([entry.group], targets)
+    } else {
+      indexGroupLocateTargets(entry.groups, targets, { id: entry.id, reason: entry.reason })
+    }
+  }
+  return targets
 }
 
 export function groupWorkspaceApprovals(rows: WorkspaceRow[]): TranscriptGroup[] {

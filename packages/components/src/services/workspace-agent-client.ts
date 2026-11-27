@@ -4,7 +4,7 @@ import type {
   FollowUpAuthReceipt, FollowUpRunsPage, FollowUpSourceRecord, FollowUpSourcesResponse,
   SuperFeedbackProcessParams, SuperFeedbackProcessResult, SuperFeedbackPush,
   SuperFeedbackSubscribeParams, SuperFeedbackSubscribeResult,
-  SuperHistory, SuperSnapshot,
+  SuperHistory, SuperMachineSummary, SuperMarkReadParams, SuperSnapshot, SuperWorkspaceSummary,
 } from "@deskfleet/protocol/super-agent"
 import { AgentClient } from "./agent-client.ts"
 
@@ -69,6 +69,8 @@ export function createWorkspaceAgentClient(signaling: AgentSignalingApi, availab
     snapshot: params => call("snapshot", params), send: params => call("send", params),
     stop: params => call("stop", params),
     archiveTicket: params => call("archiveTicket", params),
+    linkMessage: params => call("linkMessage", params),
+    createTicket: params => call("createTicket", params),
     correct: params => call("correct", params), settings: params => call("settings", params),
     followUpAuth: params => call<FollowUpAuthReceipt>("followUpAuth", params),
     followUpSources: params => call<FollowUpSourcesResponse>("followUpSources", params),
@@ -76,6 +78,8 @@ export function createWorkspaceAgentClient(signaling: AgentSignalingApi, availab
     followUpRuns: params => call<FollowUpRunsPage>("followUpRuns", params),
     subscribeFeedback,
     feedbackProcess: (params: SuperFeedbackProcessParams) => call<SuperFeedbackProcessResult>("feedbackProcess", params),
+    summary: () => call<SuperMachineSummary>("summary", {}),
+    markRead: (params: SuperMarkReadParams) => call<SuperWorkspaceSummary>("markRead", params),
   }
   return { api, close: () => { feedbackListeners.clear(); client.close() } }
 }

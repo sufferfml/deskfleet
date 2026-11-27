@@ -204,6 +204,7 @@ async function openMachine(directory: string, hostDirectory: string, options: Ma
       triageModel,
       githubPullRequest: (actor, query) => central!.githubPullRequest(actor, query),
       isInteractiveBusy: (uid, wid) => frontDesk?.isInteractiveBusy(uid, wid) ?? false,
+      onRoomChanged: (uid, wid, sourceId) => frontDesk?.notifySnapshotDirty(uid, wid, sourceId),
     })
     const scheduleHost = {
       handleSchedule: (method: string, params: Record<string, unknown>, actor: Parameters<MachineOperations["handle"]>[2]) => operations.handle(method, params, actor),

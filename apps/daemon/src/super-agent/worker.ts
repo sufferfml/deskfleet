@@ -3,7 +3,7 @@ import type { AgentActor, AgentCommand, AgentElicitation, AgentEvent, AgentInput
 import type { SuperFeedbackItem, SuperFeedbackProcessBranch, SuperMessage, SuperWorkerRequest } from "@deskfleet/protocol/super-agent"
 import { requireWorkerCommand } from "./command.ts"
 import type { AgentSessions } from "../agent/sessions.ts"
-import { errorText, note, type DispatchIntent, type StoredSuperTicket, type SuperRoom } from "./state.ts"
+import { bumpVisibleSeq, errorText, note, type DispatchIntent, type StoredSuperTicket, type SuperRoom } from "./state.ts"
 import { persistRoomFeedbackItem, persistRoomProcessBranch } from "./feedback.ts"
 import { abortOpenTurnPublicSegments, ensureTurnOutput, finalizeWorkerTurnOutput, stepWorkerTurnOutput } from "./worker-projection.ts"
 
@@ -339,14 +339,17 @@ export function projectSuperEvents(
     const explicitInputId = event.kind === "input" ? (event.payload as AgentInput).id : event.inputId
     return correlateTurn(turnId, explicitInputId, event.kind === "turn" ? event.payload as AgentTurn : undefined)
   }
-  const report = (event: AgentEvent, text: string, workerEvent: SuperMessage["workerEvent"] = "error") => {
+  const report = (event: AgentEvent, text: string, workerEvent: SuperMessage["workerEvent"] = "error", options: { visible?: boolean } = {}) => {
     const { turnId, inputId, parent, sourceMessage } = correlation(event)
     if (parent && sourceMessage && sourceMessage.ticketId === ticket.id) {
       sourceMessage.inputId = inputId
       sourceMessage.turnId = turnId
     }
     ticket.summary = text.slice(0, 700)
-    return note(room, text, { id: `worker:${ticket.id}:${event.seq}`, role: "worker", sessionId: ticket.sessionId, ticketId: ticket.id, workerEvent, sourceMessageId: parent ? parent.messageId : undefined, turnId, inputId, createdAt: event.createdAt })
+    const created = note(room, text, { id: `worker:${ticket.id}:${event.seq}`, role: "worker", sessionId: ticket.sessionId, ticketId: ticket.id, workerEvent, sourceMessageId: parent ? parent.messageId : undefined, turnId, inputId, createdAt: event.createdAt })
+    const shouldBump = options.visible ?? (workerEvent === "result" || workerEvent === "error" || workerEvent === "question")
+    if (shouldBump) bumpVisibleSeq(room, created)
+    return created
   }
   const persistedBatch: SuperFeedbackItem[] = []
   const liveBatch: SuperFeedbackItem[] = []
@@ -469,11 +472,12 @@ export function projectSuperEvents(
           addedActivities: 0,
           steerDeliveries,
         })
-        const result = report(event, finalized.text, "result")
+        const result = report(event, finalized.text, "result", { visible: turn.state !== "cancelled" })
         result.logicalId = finalized.logicalId
         if (finalized.truncated) result.truncated = true
         if (finalized.unboundedOutcome) result.unboundedOutcome = true
         if (turn.state === "cancelled") result.stopState = "stopped"
+        ticket.lastDeliveredSeq = event.seq
         ticket.output = undefined
         ticket.turnOutput = undefined
       }
