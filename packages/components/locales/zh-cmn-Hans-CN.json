@@ -991,8 +991,6 @@
     "dark": "深色",
     "preview": "实时预览",
     "defaultFont": "系统默认",
-    "textSize": "字体大小",
-    "defaultTextSize": "100%（默认）",
     "interfaceFont": "界面字体",
     "terminalFont": "终端字体",
     "fontHint": "使用已安装的字体，留空恢复默认。",
@@ -1053,7 +1051,9 @@
     "outlineAudioMaxWidth": "最大宽度",
     "outlineAudioMaxWidthHint": "横条展开的最大长度。",
     "outlineAudioDecayMs": "回落时间",
-    "outlineAudioDecayMsHint": "横条恢复原长的过渡时间。"
+    "outlineAudioDecayMsHint": "横条恢复原长的过渡时间。",
+    "textSize": "字体大小",
+    "defaultTextSize": "100%（默认）"
   },
   "githubPanel": {
     "addTab": "添加 GitHub 标签页",
@@ -1304,11 +1304,6 @@
     "retryUpload": "重试上传 {name}",
     "dropFiles": "拖放文件以添加附件",
     "completions": {
-      "adhdSkill": "本对话先给可执行的下一步，再分步说明。所有项目和 Agent 均可使用。",
-      "adhdMode": {
-        "enabled": "已为当前对话开启 ADHD 模式。发送 stop adhd mode 可关闭。",
-        "disabled": "已关闭当前对话的 ADHD 模式。"
-      },
       "label": "提示词补全",
       "references": "已选引用",
       "file": "文件",
@@ -1321,7 +1316,12 @@
       "noCommands": "此 Agent 没有匹配的命令。",
       "refine": "继续输入以缩小搜索范围。",
       "keyboard": "↑↓ 选择 · Enter 或 Tab 插入 · Esc 关闭",
-      "remove": "移除引用 {name}"
+      "remove": "移除引用 {name}",
+      "adhdSkill": "本对话先给可执行的下一步，再分步说明。所有项目和 Agent 均可使用。",
+      "adhdMode": {
+        "enabled": "已为当前对话开启 ADHD 模式。发送 stop adhd mode 可关闭。",
+        "disabled": "已关闭当前对话的 ADHD 模式。"
+      }
     },
     "context": "会话上下文",
     "contextChoice": "会话上下文：{context}",
@@ -1687,11 +1687,16 @@
     "notGit": "不是 Git 检出",
     "clean": "没有变更",
     "gitUnavailable": "可查看在线本机上会话的 Git 变更。",
-    "gitLive": "实时更新中",
     "gitPaused": "实时更新已暂停",
     "gitStale": "正在显示上次加载的变更。",
     "gitLoading": "正在加载 Git 变更…",
     "refreshGit": "刷新 Git 变更",
+    "changeScope": "对比范围",
+    "changeMode": {
+      "base": "基线分支",
+      "uncommitted": "未提交"
+    },
+    "comparingTo": "对比 {branch}",
     "detachedHead": "分离的 HEAD",
     "noCommits": "尚无提交",
     "openDiff": "查看 {path} 的{kind}差异",
@@ -1711,6 +1716,7 @@
     "truncatedDiff": "差异内容较大，仅显示开头部分。",
     "addLineComment": "评论第 {line} 行",
     "changeKind": {
+      "branch": "分支变更",
       "staged": "已暂存",
       "unstaged": "未暂存",
       "untracked": "未跟踪"
@@ -1734,6 +1740,7 @@
   },
   "catalog": {
     "local": "本地",
+    "machines": "机器",
     "workspaces": "工作区",
     "loading": "正在加载工作区…",
     "refresh": "刷新",
@@ -1763,14 +1770,14 @@
     "deleteSessionsQuestion": "工作区“{name}”仍有 {count} 个会话。要连同这些会话一并删除吗？进行中和已归档的会话、对话记录及托管工作树都会删除，磁盘上的目录将保留。",
     "confirmDeleteSessions": "一并删除",
     "edit": "编辑工作区",
-    "hide": "隐藏工作区",
-    "unhide": "取消隐藏",
-    "hiddenBadge": "已隐藏",
-    "hiddenSection": "已隐藏工作区",
     "openDefaultTerminal": "在默认目录打开终端",
     "sessions": "会话",
     "newSession": "新建会话",
-    "noSessions": "尚无会话。"
+    "noSessions": "尚无会话。",
+    "hide": "隐藏工作区",
+    "unhide": "取消隐藏",
+    "hiddenBadge": "已隐藏",
+    "hiddenSection": "已隐藏工作区"
   },
   "applications": {
     "openWith": "打开方式",
@@ -1876,12 +1883,19 @@
     "plan": "计划",
     "steered": "已引导当前轮次",
     "backlog": "排队中",
+    "backlogQueued": "{n} 条消息排队中",
+    "backlogFailed": "{n} 条异常",
+    "backlogExpand": "展开",
+    "backlogCollapse": "收起",
     "steer": "立即引导",
     "withdraw": "撤回",
     "retryInput": "重试投递",
     "uncertainInput": "无法确认是否已投递。再次提交前请检查对话。",
     "permissions": "权限",
     "permissionRequired": "需要授权",
+    "permissionMoreOptions": "更多选项",
+    "permissionPrevious": "上一条权限请求",
+    "permissionNext": "下一条权限请求",
     "questions": {
       "title": "需要你的回答",
       "urlTitle": "在浏览器中继续",
@@ -2216,7 +2230,12 @@
     "machineNameFor": "{name} 的新名称",
     "removeMachineLabel": "移除 {name}",
     "removeMachineTitle": "移除 {name}？",
-    "removeMachineDescription": "该机器在当前团队的凭据将被吊销，与此团队的连接会关闭。文件和历史记录会保留，重新加入后可继续访问。其他团队的连接不受影响。"
+    "removeMachineDescription": "该机器在当前团队的凭据将被吊销，与此团队的连接会关闭。文件和历史记录会保留，重新加入后可继续访问。其他团队的连接不受影响。",
+    "dangerZone": "危险操作",
+    "deleteTeam": "删除团队",
+    "deleteTeamDescription": "永久删除此团队、成员关系、邀请和设置。仍有机器或账单记录的团队无法删除。",
+    "deleteTeamTitle": "删除 {team}？",
+    "deleteTeamConfirmDescription": "所有成员将立即失去访问权限。此操作无法撤销。"
   },
   "addMachine": {
     "title": "向 {team} 添加机器",
@@ -2278,7 +2297,7 @@
     "showInFileManager": "在文件管理器中显示",
     "previewUnavailable": "无法预览此文件，可以下载后查看。",
     "downloadResource": "下载",
-    "previewHtml": "预览",
+    "preview": "预览",
     "viewSource": "源码",
     "csvEmpty": "此 CSV 文件为空。",
     "csvPreviewLimit": "显示前 {rows} 行和前 {columns} 列。",
@@ -2708,6 +2727,7 @@
     }
   },
   "sidebar": {
+    "chat": "聊天",
     "filterLabel": "筛选会话",
     "filterAll": "全部",
     "filterUnread": "未读",

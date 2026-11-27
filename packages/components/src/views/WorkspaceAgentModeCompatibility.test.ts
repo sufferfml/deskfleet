@@ -20,6 +20,7 @@ import { machineRuntimesKey, type MachineRuntime, type MachineRuntimes } from ".
 import { platformClientKey } from "../composables/usePlatformClient.ts"
 import { createSidebarFilter, useSidebarFilter } from "../composables/useSidebarFilter.ts"
 import { createSidebarOrder } from "../composables/useSidebarOrder.ts"
+import { createSidebarPanel } from "../composables/useSidebarPanel.ts"
 import { createWorkspaceAgentSummary, workspaceAgentSummaryKey } from "../composables/useWorkspaceAgentSummary.ts"
 import { i18n } from "../i18n/index.ts"
 import { useWorkspaceAgentMode } from "../services/workspace-agent-navigation.ts"
@@ -100,6 +101,7 @@ function makeAccount(options: {
     machine: computed(() => machines.value.find(m => m.id === machineId.value)),
     machines,
     enrollment: ref({ teamId: teamId.value, machineId: "local-daemon" }),
+    superAgentEnabled: computed(() => false),
     openMachineRoute: vi.fn(),
     refreshMachines: vi.fn(async () => {}),
     dialog: ref(undefined),
@@ -612,6 +614,7 @@ test("unopened machine in SA mode reports unknown until lightweight summary arri
     sidebarScrollTop: 0,
     sidebarFilter,
     sidebarOrder: createSidebarOrder(computed(() => "scope")),
+    sidebarPanel: createSidebarPanel(),
     hiddenWorkspaces: createHiddenWorkspaces(computed(() => "scope")),
     workspaceAgentSummary: summaryStore,
     open: vi.fn(),
@@ -853,6 +856,7 @@ test("SA sidebar refresh button tracks manual refresh and failure retry catalog 
     sidebarScrollTop: 0,
     sidebarFilter,
     sidebarOrder: createSidebarOrder(computed(() => "scope")),
+    sidebarPanel: createSidebarPanel(),
     hiddenWorkspaces: createHiddenWorkspaces(computed(() => "scope")),
     workspaceAgentSummary: createWorkspaceAgentSummary({ session: account }),
     open: vi.fn(() => runtime),

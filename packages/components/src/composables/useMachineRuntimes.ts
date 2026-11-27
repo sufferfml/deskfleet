@@ -10,6 +10,7 @@ import { platformClientKey } from "./usePlatformClient.ts"
 import { createHiddenWorkspaces, type HiddenWorkspaces } from "./useHiddenWorkspaces.ts"
 import { createSidebarFilter, type SidebarFilterState } from "./useSidebarFilter.ts"
 import { createSidebarOrder, type SidebarOrder } from "./useSidebarOrder.ts"
+import { createSidebarPanel, panelForRouteName, type SidebarPanelState } from "./useSidebarPanel.ts"
 import { createWorkspaceAgentSummary, workspaceAgentSummaryKey, type WorkspaceAgentSummaryStore } from "./useWorkspaceAgentSummary.ts"
 import { i18n } from "../i18n/index.ts"
 import { router } from "../router/index.ts"
@@ -36,6 +37,7 @@ export interface MachineRuntimes {
   sidebarOrder: SidebarOrder
   hiddenWorkspaces: HiddenWorkspaces
   workspaceAgentSummary?: WorkspaceAgentSummaryStore
+  sidebarPanel: SidebarPanelState
   open(machine: Machine): MachineRuntime
 }
 
@@ -53,6 +55,7 @@ export function createMachineRuntimes(
   const canUseWorkspaceAgent = host.platform !== "web" || host.remoteWorkspaceAgent === true
   const opened = shallowReactive(new Map<string, MachineRuntime>())
   const sidebarFilter = createSidebarFilter()
+  const sidebarPanel = createSidebarPanel(panelForRouteName(router.currentRoute.value.name) ?? "conversations")
   function release(id: string): void {
     const runtime = opened.get(id)
     opened.delete(id)
@@ -71,6 +74,7 @@ export function createMachineRuntimes(
     sidebarFilter.filter.value = "all"
     sidebarFilter.counts.clear()
     workspaceAgentSummary.resetScope()
+    sidebarPanel.reset()
   }, { flush: "sync" })
   watch(() => [session.machines.value.map(machine => ({ ...machine })), session.machineRosterVersion.value] as const, ([machines, version], [, previousVersion]) => {
     for (const [id, runtime] of opened) {
@@ -91,6 +95,7 @@ export function createMachineRuntimes(
     sidebarOrder,
     hiddenWorkspaces,
     workspaceAgentSummary,
+    sidebarPanel,
     open(machine) {
       if (session.teamId.value !== machine.teamId) throw new Error("Machine is outside the selected team")
       const existing = opened.get(machine.id)

@@ -991,8 +991,6 @@
     "dark": "ダーク",
     "preview": "ライブプレビュー",
     "defaultFont": "システムのデフォルト",
-    "textSize": "文字サイズ",
-    "defaultTextSize": "100%（標準）",
     "interfaceFont": "インターフェースのフォント",
     "terminalFont": "ターミナルのフォント",
     "fontHint": "インストール済みのフォントを指定してください。空欄の場合はデフォルトを使用します。",
@@ -1053,7 +1051,9 @@
     "outlineAudioMaxWidth": "最大幅",
     "outlineAudioMaxWidthHint": "音声連動時のバーの最大幅。",
     "outlineAudioDecayMs": "減衰時間",
-    "outlineAudioDecayMsHint": "バーが元の長さに戻るまでの時間。"
+    "outlineAudioDecayMsHint": "バーが元の長さに戻るまでの時間。",
+    "textSize": "文字サイズ",
+    "defaultTextSize": "100%（標準）"
   },
   "githubPanel": {
     "addTab": "GitHub タブを追加",
@@ -1304,11 +1304,6 @@
     "retryUpload": "{name} のアップロードを再試行",
     "dropFiles": "ファイルをドロップして添付",
     "completions": {
-      "adhdSkill": "次の行動を先に示し、作業を手順に分けます。すべてのプロジェクトとエージェントで使えます。",
-      "adhdMode": {
-        "enabled": "この会話の ADHD モードを有効にしました。「stop adhd mode」で解除できます。",
-        "disabled": "この会話の ADHD モードを解除しました。"
-      },
       "label": "プロンプトの候補",
       "references": "選択した参照",
       "file": "ファイル",
@@ -1321,7 +1316,12 @@
       "noCommands": "このエージェントのコマンドに一致するものはありません。",
       "refine": "さらに入力して候補を絞り込んでください。",
       "keyboard": "↑↓ で選択 · Enter または Tab で挿入 · Esc で閉じる",
-      "remove": "参照 {name} を削除"
+      "remove": "参照 {name} を削除",
+      "adhdSkill": "次の行動を先に示し、作業を手順に分けます。すべてのプロジェクトとエージェントで使えます。",
+      "adhdMode": {
+        "enabled": "この会話の ADHD モードを有効にしました。「stop adhd mode」で解除できます。",
+        "disabled": "この会話の ADHD モードを解除しました。"
+      }
     },
     "context": "セッションの作業環境",
     "contextChoice": "セッションの作業環境: {context}",
@@ -1687,11 +1687,16 @@
     "notGit": "Git チェックアウトではありません",
     "clean": "変更はありません",
     "gitUnavailable": "Git の状態はオンラインのローカルマシン上にあるセッションで確認できます。",
-    "gitLive": "リアルタイム更新中",
     "gitPaused": "リアルタイム更新を一時停止中",
     "gitStale": "最後に読み込んだ変更を表示しています。",
     "gitLoading": "Git の変更を読み込み中…",
     "refreshGit": "Git の変更を更新",
+    "changeScope": "比較対象",
+    "changeMode": {
+      "base": "ベースブランチ",
+      "uncommitted": "未コミット"
+    },
+    "comparingTo": "{branch} と比較",
     "detachedHead": "HEAD がブランチから切り離されています",
     "noCommits": "コミットはまだありません",
     "openDiff": "{path} の差分を表示 ({kind})",
@@ -1711,6 +1716,7 @@
     "truncatedDiff": "差分が大きいため、先頭部分のみ表示しています。",
     "addLineComment": "{line} 行目にコメント",
     "changeKind": {
+      "branch": "ブランチ変更",
       "staged": "ステージ済み",
       "unstaged": "未ステージ",
       "untracked": "未追跡"
@@ -1734,6 +1740,7 @@
   },
   "catalog": {
     "local": "ローカル",
+    "machines": "マシン",
     "workspaces": "ワークスペース",
     "loading": "ワークスペースを読み込み中…",
     "refresh": "更新",
@@ -1763,14 +1770,14 @@
     "deleteSessionsQuestion": "ワークスペース「{name}」にはまだ {count} 件のセッションがあります。ワークスペースと一緒に削除しますか？進行中とアーカイブ済みのセッション、会話、管理対象のワークツリーが削除されます。ディレクトリはディスクに残ります。",
     "confirmDeleteSessions": "まとめて削除",
     "edit": "ワークスペースを編集",
-    "hide": "ワークスペースを非表示",
-    "unhide": "非表示を解除",
-    "hiddenBadge": "非表示",
-    "hiddenSection": "非表示のワークスペース",
     "openDefaultTerminal": "デフォルトのディレクトリでターミナルを開く",
     "sessions": "セッション",
     "newSession": "新しいセッション",
-    "noSessions": "セッションはまだありません。"
+    "noSessions": "セッションはまだありません。",
+    "hide": "ワークスペースを非表示",
+    "unhide": "非表示を解除",
+    "hiddenBadge": "非表示",
+    "hiddenSection": "非表示のワークスペース"
   },
   "applications": {
     "openWith": "アプリで開く",
@@ -1876,12 +1883,19 @@
     },
     "steered": "実行中の指示を更新しました",
     "backlog": "キューに追加済み",
+    "backlogQueued": "{n} 件のメッセージが待機中",
+    "backlogFailed": "{n} 件のエラー",
+    "backlogExpand": "展開",
+    "backlogCollapse": "折りたたむ",
     "steer": "今すぐ指示を追加",
     "withdraw": "取り消す",
     "retryInput": "送信を再試行",
     "uncertainInput": "送信を確認できませんでした。再送信する前に会話を確認してください。",
     "permissions": "権限",
     "permissionRequired": "許可が必要です",
+    "permissionMoreOptions": "その他のオプション",
+    "permissionPrevious": "前の許可リクエスト",
+    "permissionNext": "次の許可リクエスト",
     "questions": {
       "title": "入力が必要です",
       "urlTitle": "ブラウザーで続行",
@@ -2216,7 +2230,12 @@
     "machineNameFor": "{name} の新しい名前",
     "removeMachineLabel": "{name} を削除",
     "removeMachineTitle": "{name} を削除しますか？",
-    "removeMachineDescription": "このチームの認証情報が失効し、このチームとの接続が切断されます。ファイルと履歴は再参加に備えて保持されます。他のチームとの接続は維持されます。"
+    "removeMachineDescription": "このチームの認証情報が失効し、このチームとの接続が切断されます。ファイルと履歴は再参加に備えて保持されます。他のチームとの接続は維持されます。",
+    "dangerZone": "危険な操作",
+    "deleteTeam": "チームを削除",
+    "deleteTeamDescription": "このチーム、メンバーシップ、招待、設定を完全に削除します。マシンまたは請求記録が残っているチームは削除できません。",
+    "deleteTeamTitle": "{team} を削除しますか？",
+    "deleteTeamConfirmDescription": "全員がすぐにアクセスできなくなります。この操作は元に戻せません。"
   },
   "addMachine": {
     "title": "{team} にマシンを追加",
@@ -2278,7 +2297,7 @@
     "showInFileManager": "ファイルマネージャーで表示",
     "previewUnavailable": "このファイルはプレビューできません。ダウンロードして確認してください。",
     "downloadResource": "ダウンロード",
-    "previewHtml": "プレビュー",
+    "preview": "プレビュー",
     "viewSource": "ソース",
     "csvEmpty": "この CSV ファイルは空です。",
     "csvPreviewLimit": "先頭の {rows} 行と {columns} 列を表示しています。",
@@ -2708,6 +2727,7 @@
     }
   },
   "sidebar": {
+    "chat": "チャット",
     "filterLabel": "セッションを絞り込む",
     "filterAll": "すべて",
     "filterUnread": "未読",

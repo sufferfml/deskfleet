@@ -11,6 +11,7 @@ import { machineRuntimesKey, type MachineRuntime, type MachineRuntimes } from ".
 import { platformClientKey } from "../../composables/usePlatformClient.ts"
 import { createSidebarFilter } from "../../composables/useSidebarFilter.ts"
 import { createSidebarOrder } from "../../composables/useSidebarOrder.ts"
+import { createSidebarPanel } from "../../composables/useSidebarPanel.ts"
 import { useWorkspaceAgentMode } from "../../services/workspace-agent-navigation.ts"
 import { useFleetStore } from "../../stores/fleet.ts"
 import { fakeCentral, machineFixture } from "../../test/central.ts"
@@ -143,6 +144,7 @@ test("preserves refresh click dispatch and catalogLoading disabled state without
     sidebarScrollTop: 0,
     sidebarFilter: createSidebarFilter(),
     sidebarOrder: createSidebarOrder(computed(() => "test")),
+    sidebarPanel: createSidebarPanel(),
     open: vi.fn(() => runtime),
   } as unknown as MachineRuntimes
 

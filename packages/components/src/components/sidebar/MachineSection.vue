@@ -8,6 +8,7 @@ import {
   FolderOpen,
   FolderPlus,
   LocateFixed,
+  MessageCircle,
   MonitorPlay,
   Plus,
   SquarePen,
@@ -31,6 +32,7 @@ import { machineOrderGroup, sessionOrderGroup, useSidebarOrder, workspaceOrderGr
 import { useWorkspaceAgentSummary } from "../../composables/useWorkspaceAgentSummary.ts"
 import { useAgentSessionsStore } from "../../stores/agent-sessions.ts"
 import { useFleetStore } from "../../stores/fleet.ts"
+import { usePinnedSessionsStore } from "../../stores/pinned-sessions.ts"
 import { useTerminalsStore } from "../../stores/terminals.ts"
 import UiButton from "../common/UiButton.vue"
 import WorkspaceCreateDialog from "../catalog/WorkspaceCreateDialog.vue"
@@ -59,6 +61,7 @@ const { t, locale } = useI18n()
 const sessionLabel = useSessionLabel()
 const agents = useAgentSessionsStore()
 const fleet = useFleetStore()
+const pins = usePinnedSessionsStore()
 const terminals = useTerminalsStore()
 const route = useRoute()
 const router = useRouter()
@@ -153,6 +156,7 @@ const matchesFilter = (session: AgentSessionSummary) => {
   const indicator = sessionIndicator(session)
   return mode === "working" ? Boolean(indicator) : !indicator && sessionIsUnread(session)
 }
+const notPinned = (session: AgentSessionSummary) => !pins.isPinned(props.machine.id, session.id)
 
 const unopened = computed(() => Boolean(runtimes && !runtimes.opened.has(props.machine.id)))
 
@@ -202,21 +206,27 @@ watchEffect(() => {
 })
 onBeforeUnmount(() => { sidebarFilter.counts.delete(props.machine.id) })
 
+// Pinned sessions appear solely in PinnedSessions above the tree in classic mode to avoid duplicate rows.
+const unpinnedMachineSessions = computed(() => activeMachineSessions.value.filter(notPinned))
 const filterWorkspaces = (items: typeof activeWorkspaces.value) => {
   if (projectHome.value && saSidebarSummary.value) {
     const summaryMap = saSidebarSummary.value.workspaces
     const mapped = items.map(workspace => ({
       ...workspace,
+      unpinnedSessions: workspace.allSessions,
       sessions: summaryMap.get(workspace.id)?.matchedWorkers ?? [],
     }))
     return filtering.value ? mapped.filter(workspace => summaryMap.get(workspace.id)?.visible) : mapped
   }
-  const mapped = items.map(workspace => ({ ...workspace, sessions: workspace.allSessions.filter(matchesFilter) }))
+  const mapped = items.map(workspace => {
+    const unpinned = workspace.allSessions.filter(notPinned)
+    return { ...workspace, unpinnedSessions: unpinned, sessions: unpinned.filter(matchesFilter) }
+  })
   return filtering.value ? mapped.filter(workspace => workspace.sessions.length > 0) : mapped
 }
 const sessions = computed(() => projectHome.value && saSidebarSummary.value
   ? saSidebarSummary.value.unassigned.matched
-  : activeMachineSessions.value.filter(matchesFilter))
+  : unpinnedMachineSessions.value.filter(matchesFilter))
 const workspaces = computed(() => filterWorkspaces(visibleActiveWorkspaces.value))
 const revealedHiddenWorkspaces = computed(() => showingHidden.value ? filterWorkspaces(hiddenActiveWorkspaces.value) : [])
 const hasHiddenWorkspaces = computed(() => unopened.value
@@ -264,8 +274,10 @@ watch(() => hiddenActiveWorkspaces.value.length, (count, previous) => {
   if (count === 0 && previous > 0 && showingHidden.value) hiddenWorkspaces.setShowingHidden(props.machine.id, false)
 })
 
+const selectedMachine = computed(() => !account || account.machineId.value === props.machine.id)
+
 const activeSessionId = computed(() =>
-  route.name === "session" && (!account || account.machineId.value === props.machine.id) && typeof route.params.sessionId === "string"
+  route.name === "session" && selectedMachine.value && typeof route.params.sessionId === "string"
     ? route.params.sessionId : undefined,
 )
 watch([activeSessionId, sessions, workspaces, revealedHiddenWorkspaces], ([id]) => {
@@ -291,7 +303,7 @@ function workspaceCreated(id: string): void {
   else startSession(id)
 }
 
-function startSession(workspaceId: string): void {
+function startSession(workspaceId: string | null): void {
   fleet.targetWorkspace(workspaceId)
   openRoute({ name: "new-session" })
 }
@@ -358,8 +370,8 @@ const machineIndicator = computed(() => {
   if (!collapsed.value) return false
   if (projectHome.value) return saSidebarSummary.value?.machineWorking ?? false
   return sessionsIndicator([
-    ...activeMachineSessions.value, ...defaultSessions.value,
-    ...sidebarActiveWorkspaces.value.flatMap(workspace => workspace.allSessions),
+    ...unpinnedMachineSessions.value,
+    ...sidebarActiveWorkspaces.value.flatMap(workspace => workspace.allSessions.filter(notPinned)),
   ])
 })
 const machineHeaderUnread = computed(() => Boolean(projectHome.value && collapsed.value && saSidebarSummary.value?.machineUnread))
@@ -367,18 +379,34 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
 </script>
 
 <template>
-  <CollapsibleRoot v-if="showMachine" as="section" :data-machine-id="machine.id" :data-machine-summary="machineSummaryUnknown ? 'unknown' : undefined" :open="!collapsed" class="mt-4 first:mt-0" @update:open="toggleMachine">
+  <CollapsibleRoot
+    v-if="showMachine"
+    as="section"
+    :data-machine-id="machine.id"
+    :data-machine-summary="machineSummaryUnknown ? 'unknown' : undefined"
+    :open="!collapsed"
+    :class="projectHome ? 'mt-4 first:mt-0' : 'mt-2 first:mt-0'"
+    @update:open="toggleMachine"
+  >
     <MachineContextMenu :machine-id="machine.id" :name="machine.name" :showing-hidden="showingHidden" :has-hidden-workspaces="hasHiddenWorkspaces" @toggle-hidden="toggleHiddenWorkspaces">
-      <SidebarReorderRow v-slot="{ source }" :group="machineOrderGroup" :id="machine.id" :items="machineItems" class="group flex h-8 items-center gap-1 pl-2.5 pr-1">
+      <SidebarReorderRow
+        v-slot="{ source }"
+        :group="machineOrderGroup"
+        :id="machine.id"
+        :items="machineItems"
+        :class="projectHome
+          ? 'group flex h-8 items-center gap-1 pl-2.5 pr-1'
+          : 'group flex h-8 items-center rounded-lg pl-2.5 pr-1 ui-motion hover:bg-ui-hover'"
+      >
         <CollapsibleTrigger
           v-bind="source"
           type="button"
-          class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left text-[13px] font-medium text-ui-text-muted ui-motion hover:text-ui-text"
+          class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-1.5 pr-1 text-left text-[13px] font-medium text-ui-text-muted ui-motion group-hover:text-ui-text"
         >
-          <span class="truncate" :title="duplicateMachine ? machine.name + ' #' + machine.id : undefined">{{ machine.name }}</span>
+          <span :class="projectHome ? 'truncate' : 'min-w-0 flex-1 truncate'" :title="duplicateMachine ? machine.name + ' #' + machine.id : undefined">{{ machine.name }}</span>
           <small v-if="duplicateMachine" class="shrink-0 text-xs text-ui-text-muted">#{{ machine.id }}</small>
           <span v-if="machine.local" class="inline-flex shrink-0 items-center text-ui-text-muted" :title="t('machine.local')">
-            <LocateFixed :size="14" :stroke-width="1.75" aria-hidden="true" />
+            <LocateFixed :size="projectHome ? 14 : 13" :stroke-width="1.75" aria-hidden="true" />
             <span class="sr-only">{{ t("machine.local") }}</span>
           </span>
           <span
@@ -392,21 +420,46 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
           <MachineBatteryIndicator :machine-id="machine.id" :online="machine.online" />
           <SessionWorkingIndicator v-if="machineIndicator" :state="machineIndicator" />
           <SessionUnreadIndicator v-if="machineHeaderUnread" />
-          <ChevronRight v-if="collapsed" :size="14" class="shrink-0" aria-hidden="true" />
+          <ChevronRight v-if="projectHome && collapsed" :size="14" class="shrink-0" aria-hidden="true" />
         </CollapsibleTrigger>
-        <UiButton v-if="projectHome" data-new-project variant="ghost" size="icon" :title="t('superAgent.newProject')" :aria-label="t('superAgent.newProject')" :disabled="!machine.online" @click="openRoute(newProject)">
-          <Plus :size="16" :stroke-width="1.75" aria-hidden="true" />
-        </UiButton>
-        <TreeLink v-if="projectHome" :machine-id="machine.id" :to="{ name: 'machine-control', params: { machineId: machine.id } }"
-          :icon="machine.local ? SquareTerminal : MonitorPlay" :label="t(machine.local ? 'machine.localControl' : 'machine.remoteControl')" :depth="0" compact />
-        <div v-if="machine.online && !projectHome" class="flex op-0 ui-motion group-hover:op-100 group-focus-within:op-100">
-          <UiButton variant="ghost" size="icon" :label="t('machine.addWorkspace')" :placeholder="false" :disabled="unopened || !fleet.canManageCatalog" @click="addingWorkspace = true"><FolderPlus :size="16" :stroke-width="1.75" aria-hidden="true" /></UiButton>
+        <template v-if="projectHome">
+          <UiButton data-new-project variant="ghost" size="icon" :title="t('superAgent.newProject')" :aria-label="t('superAgent.newProject')" :disabled="!machine.online" @click="openRoute(newProject)">
+            <Plus :size="16" :stroke-width="1.75" aria-hidden="true" />
+          </UiButton>
+          <TreeLink :machine-id="machine.id" :to="{ name: 'machine-control', params: { machineId: machine.id } }"
+            :icon="machine.local ? SquareTerminal : MonitorPlay" :label="t(machine.local ? 'machine.localControl' : 'machine.remoteControl')" :depth="0" compact />
+        </template>
+        <div v-else class="flex shrink-0 items-center gap-0.5">
+          <div
+            v-if="machine.online"
+            class="flex shrink-0 items-center text-ui-text-faint ui-motion can-hover:max-w-0 can-hover:overflow-hidden can-hover:op-0 can-hover:pointer-events-none group-hover:max-w-8 group-hover:op-100 group-hover:pointer-events-auto group-has-[:focus-visible]:max-w-8 group-has-[:focus-visible]:op-100 group-has-[:focus-visible]:pointer-events-auto"
+          >
+            <UiButton
+              variant="ghost"
+              size="icon"
+              class="!h-6 !w-6 rounded-md text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-ui-text/8 [&:not(:disabled,[aria-disabled=true])]:hover:text-ui-text"
+              :label="t('machine.addWorkspace')"
+              :placeholder="false"
+              :disabled="unopened || !fleet.canManageCatalog"
+              @click="addingWorkspace = true"
+            >
+              <FolderPlus :size="14" :stroke-width="1.75" aria-hidden="true" />
+            </UiButton>
+          </div>
+          <CollapsibleTrigger
+            type="button"
+            tabindex="-1"
+            aria-hidden="true"
+            class="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-ui-text-faint ui-motion hover:bg-ui-text/8 hover:text-ui-text"
+          >
+            <ChevronRight :size="14" :stroke-width="1.75" class="ui-motion" :class="!collapsed && 'rotate-90'" aria-hidden="true" />
+          </CollapsibleTrigger>
         </div>
       </SidebarReorderRow>
     </MachineContextMenu>
     <WorkspaceCreateDialog v-if="addingWorkspace" @created="workspaceCreated" @cancel="addingWorkspace = false" />
 
-    <CollapsibleContent as="ul" class="mt-1 flex flex-col gap-1">
+    <CollapsibleContent as="ul" class="m-0 mt-1 flex list-none flex-col gap-1 p-0">
       <template v-if="projectHome">
         <CollapsibleRoot v-if="!filtering || saSidebarSummary?.defaultWorkspace.visible" :open="defaultWorkspaceExpanded" as="li" data-default-workspace @update:open="value => (defaultWorkspaceOpen = value)">
           <div class="ui-nav-item relative pr-1" :class="route.name === 'new-session' && (!account || account.machineId.value === machine.id) && 'ui-nav-active'">
@@ -541,69 +594,50 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
           :to="{ name: 'machine-control', params: { machineId: machine.id } }"
           :icon="machine.local ? SquareTerminal : MonitorPlay"
           :label="t(machine.local ? 'machine.localControl' : 'machine.remoteControl')"
-          :depth="0"
+          :depth="1"
         />
       </li>
-      <SidebarReorderRow v-for="session in visibleOf('', sessions)" :key="session.id" v-slot="{ source }" as="li" :group="sessionGroup()" :id="session.id" :items="activeMachineSessions">
-        <SessionContextMenu v-slot="{ requestArchive, pending }" :machine-id="machine.id" :session-id="session.id" :title="session.title ?? ''" :context="session.context" :archive-state="session.archiveState" :disabled="!machine.online">
-          <SessionHoverTooltip :machine-id="machine.id" :session-id="session.id" :title="sessionLabel(session)" :machine-name="machine.name" :online="machine.online" :context="session.context">
-            <TreeLink :machine-id="machine.id" :to="{ name: 'session', params: { sessionId: session.id } }" :label="sessionLabel(session)" :depth="0" :drag-source="source">
-              <template #trailing>
-                <SessionPullRequestIndicators :machine-id="machine.id" :session-id="session.id" />
-                <SessionWorkingIndicator v-if="sessionIndicator(session)" :state="sessionIndicator(session)" />
-                <SessionUnreadIndicator v-else-if="sessionIsUnread(session)" />
-              </template>
-              <template v-if="session.archiveState === 'active' || session.archiveState === 'archiving'" #actions>
-                <UiButton
-                  variant="ghost"
-                  size="icon"
-                  class="text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-current/15 [&:not(:disabled,[aria-disabled=true])]:hover:text-current [&:not(:disabled,[aria-disabled=true])]:active:bg-current/20"
-                  :label="t(session.archiveState === 'archiving' ? 'agent.retryArchive' : 'agent.archive')"
-                  :disabled="!machine.online || pending || !session.context"
-                  @click="requestArchive()"
-                >
-                  <Archive :size="16" :stroke-width="1.75" aria-hidden="true" />
-                </UiButton>
-              </template>
-            </TreeLink>
-          </SessionHoverTooltip>
-        </SessionContextMenu>
-      </SidebarReorderRow>
-      <li v-if="sessions.length > MAX_VISIBLE_SESSIONS">
-        <button type="button" class="ui-nav-item w-full px-2.5 text-left text-xs text-ui-text-faint hover:text-ui-text" @click="toggleGroup('')">
-          {{ expandedGroups.has('') ? t('sidebar.showFewerSessions') : t('sidebar.showMoreSessions', { count: sessions.length - MAX_VISIBLE_SESSIONS }) }}
-        </button>
-      </li>
-      <li v-if="!filtering && activeWorkspaces.length === 0 && sessions.length === 0" class="h-8 px-2.5 leading-8 text-ui-text-faint">
-        {{ t("machine.noWorkspaces") }}
-      </li>
-      <CollapsibleRoot v-for="workspace in workspaces" :key="workspace.id" v-slot="{ open }" as="li" :data-workspace-id="workspace.id" default-open class="flex flex-col gap-1">
-        <WorkspaceContextMenu :workspace-id="workspace.id" :machine-id="machine.id" :name="workspace.name" :directories="workspace.directories" :disabled="!machine.online || !fleet.canManageCatalog">
-          <SidebarReorderRow v-slot="{ source }" :group="workspaceGroup" :id="workspace.id" :items="visibleActiveWorkspaces" class="workspace-row ui-nav-item relative">
-            <CollapsibleTrigger v-bind="source" type="button" :aria-label="workspace.name" class="relative flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2.5 pl-2.5 pr-1 text-left">
-              <component :is="open ? FolderOpen : Folder" :size="15" :stroke-width="1.75" class="workspace-folder-icon shrink-0" aria-hidden="true" />
-              <ChevronRight :size="15" :stroke-width="1.75" class="workspace-collapse-icon absolute left-2.5 shrink-0" :class="open && 'rotate-90'" aria-hidden="true" />
-              <span class="truncate">{{ workspace.name }}</span>
-              <SessionWorkingIndicator v-if="!open && sessionsIndicator(workspace.sessions)" :state="sessionsIndicator(workspace.sessions)" />
-            </CollapsibleTrigger>
-            <div class="workspace-actions flex shrink-0 items-center pr-1">
-              <UiButton variant="ghost" size="icon" :label="t('workspace.openDefaultTerminal')" class="text-inherit enabled:hover:bg-transparent enabled:hover:text-inherit" :disabled="!machine.online || openingTerminal || workspace.directories.length === 0" @click="openTerminal(workspace)"><SquareTerminal :size="16" :stroke-width="1.75" aria-hidden="true" /></UiButton>
-              <UiButton variant="ghost" size="icon" :label="t('workspace.newSession')" class="text-inherit enabled:hover:bg-transparent enabled:hover:text-inherit" :disabled="!machine.online" @click="startSession(workspace.id)"><SquarePen :size="16" :stroke-width="1.75" aria-hidden="true" /></UiButton>
+      <CollapsibleRoot v-if="sessions.length > 0" v-slot="{ open }" as="li" default-open class="flex flex-col gap-1">
+        <div class="group/chat flex h-8 items-center rounded-lg pl-4 pr-1 ui-motion hover:bg-ui-hover">
+          <CollapsibleTrigger
+            type="button"
+            :aria-label="t('sidebar.chat')"
+            class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2.5 pr-1 text-left text-[13px] text-ui-text ui-motion"
+          >
+            <MessageCircle :size="15" :stroke-width="1.75" class="shrink-0" aria-hidden="true" />
+            <span class="min-w-0 flex-1 truncate">{{ t("sidebar.chat") }}</span>
+            <SessionWorkingIndicator v-if="!open && sessionsIndicator(sessions)" :state="sessionsIndicator(sessions)" />
+          </CollapsibleTrigger>
+          <div class="flex shrink-0 items-center gap-0.5">
+            <div
+              class="flex shrink-0 items-center gap-0.5 text-ui-text-faint ui-motion can-hover:max-w-0 can-hover:overflow-hidden can-hover:op-0 can-hover:pointer-events-none group-hover/chat:max-w-7 group-hover/chat:op-100 group-hover/chat:pointer-events-auto group-has-[:focus-visible]/chat:max-w-7 group-has-[:focus-visible]/chat:op-100 group-has-[:focus-visible]/chat:pointer-events-auto"
+            >
+              <UiButton
+                variant="ghost"
+                size="icon"
+                :label="t('workspace.newSession')"
+                class="!h-6 !w-6 rounded-md text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-ui-text/8 [&:not(:disabled,[aria-disabled=true])]:hover:text-ui-text"
+                :disabled="!machine.online"
+                @click="startSession(null)"
+              >
+                <SquarePen :size="14" :stroke-width="1.75" aria-hidden="true" />
+              </UiButton>
             </div>
-          </SidebarReorderRow>
-        </WorkspaceContextMenu>
-        <p v-if="terminalError?.workspaceId === workspace.id" role="alert" class="m-0 break-words px-2.5 text-xs text-ui-danger">{{ terminalError.message }}</p>
-        <CollapsibleContent as="ul" class="flex flex-col gap-1 empty:hidden">
-          <template v-if="!filtering">
-            <li v-for="terminal in workspace.terminals" :key="terminal.id">
-              <TreeLink :machine-id="machine.id" :to="terminalLink(terminal.id)" :icon="SquareTerminal" :label="terminal.title" :depth="1" />
-            </li>
-          </template>
-          <SidebarReorderRow v-for="session in visibleOf(workspace.id, workspace.sessions)" :key="session.id" v-slot="{ source }" as="li" :group="sessionGroup(workspace.id)" :id="session.id" :items="workspace.allSessions">
+            <CollapsibleTrigger
+              type="button"
+              tabindex="-1"
+              aria-hidden="true"
+              class="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-ui-text-faint ui-motion hover:bg-ui-text/8 hover:text-ui-text"
+            >
+              <ChevronRight :size="14" :stroke-width="1.75" class="ui-motion" :class="open && 'rotate-90'" aria-hidden="true" />
+            </CollapsibleTrigger>
+          </div>
+        </div>
+        <CollapsibleContent as="ul" class="m-0 flex list-none flex-col gap-1 p-0 empty:hidden">
+          <SidebarReorderRow v-for="session in visibleOf('', sessions)" :key="session.id" v-slot="{ source }" as="li" :group="sessionGroup()" :id="session.id" :items="unpinnedMachineSessions">
             <SessionContextMenu v-slot="{ requestArchive, pending }" :machine-id="machine.id" :session-id="session.id" :title="session.title ?? ''" :context="session.context" :archive-state="session.archiveState" :disabled="!machine.online">
-              <!-- A Session's shells open in its bottom panel, not the sidebar. -->
               <SessionHoverTooltip :machine-id="machine.id" :session-id="session.id" :title="sessionLabel(session)" :machine-name="machine.name" :online="machine.online" :context="session.context">
-                <TreeLink :machine-id="machine.id" :to="{ name: 'session', params: { sessionId: session.id } }" :label="sessionLabel(session)" :depth="1" :drag-source="source">
+                <TreeLink :machine-id="machine.id" :to="{ name: 'session', params: { sessionId: session.id } }" :label="sessionLabel(session)" :depth="2" :drag-source="source">
                   <template #trailing>
                     <SessionPullRequestIndicators :machine-id="machine.id" :session-id="session.id" />
                     <SessionWorkingIndicator v-if="sessionIndicator(session)" :state="sessionIndicator(session)" />
@@ -613,12 +647,110 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
                     <UiButton
                       variant="ghost"
                       size="icon"
-                      class="text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-current/15 [&:not(:disabled,[aria-disabled=true])]:hover:text-current [&:not(:disabled,[aria-disabled=true])]:active:bg-current/20"
+                      class="!h-6 !w-6 rounded-md text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-ui-text/8 [&:not(:disabled,[aria-disabled=true])]:hover:text-ui-text [&:not(:disabled,[aria-disabled=true])]:active:bg-ui-text/14"
                       :label="t(session.archiveState === 'archiving' ? 'agent.retryArchive' : 'agent.archive')"
                       :disabled="!machine.online || pending || !session.context"
                       @click="requestArchive()"
                     >
-                      <Archive :size="16" :stroke-width="1.75" aria-hidden="true" />
+                      <Archive :size="14" :stroke-width="1.75" aria-hidden="true" />
+                    </UiButton>
+                  </template>
+                </TreeLink>
+              </SessionHoverTooltip>
+            </SessionContextMenu>
+          </SidebarReorderRow>
+          <li v-if="sessions.length > MAX_VISIBLE_SESSIONS">
+            <button type="button" class="ui-nav-item w-full pl-[41px] pr-2.5 text-left text-xs text-ui-text-faint hover:text-ui-text" @click="toggleGroup('')">
+              {{ expandedGroups.has('') ? t('sidebar.showFewerSessions') : t('sidebar.showMoreSessions', { count: sessions.length - MAX_VISIBLE_SESSIONS }) }}
+            </button>
+          </li>
+        </CollapsibleContent>
+      </CollapsibleRoot>
+      <li v-if="!filtering && activeWorkspaces.length === 0 && activeMachineSessions.length === 0" class="h-8 pl-6 pr-2.5 leading-8 text-ui-text-faint">
+        {{ t("machine.noWorkspaces") }}
+      </li>
+      <CollapsibleRoot v-for="workspace in workspaces" :key="workspace.id" v-slot="{ open }" as="li" :data-workspace-id="workspace.id" default-open class="flex flex-col gap-1">
+        <WorkspaceContextMenu :workspace-id="workspace.id" :machine-id="machine.id" :name="workspace.name" :directories="workspace.directories" :disabled="!machine.online || !fleet.canManageCatalog">
+          <SidebarReorderRow
+            v-slot="{ source }"
+            :group="workspaceGroup"
+            :id="workspace.id"
+            :items="visibleActiveWorkspaces"
+            class="workspace-row group/ws flex h-8 items-center rounded-lg pl-4 pr-1 ui-motion hover:bg-ui-hover"
+          >
+            <CollapsibleTrigger
+              v-bind="source"
+              type="button"
+              :aria-label="workspace.name"
+              class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2.5 pr-1 text-left text-[13px] text-ui-text ui-motion"
+            >
+              <component :is="open ? FolderOpen : Folder" :size="15" :stroke-width="1.75" class="shrink-0" aria-hidden="true" />
+              <span class="min-w-0 flex-1 truncate">{{ workspace.name }}</span>
+              <SessionWorkingIndicator v-if="!open && sessionsIndicator(workspace.sessions)" :state="sessionsIndicator(workspace.sessions)" />
+            </CollapsibleTrigger>
+            <div class="flex shrink-0 items-center gap-0.5">
+              <div
+                class="flex shrink-0 items-center gap-0.5 text-ui-text-faint ui-motion can-hover:max-w-0 can-hover:overflow-hidden can-hover:op-0 can-hover:pointer-events-none group-hover/ws:max-w-14 group-hover/ws:op-100 group-hover/ws:pointer-events-auto group-has-[:focus-visible]/ws:max-w-14 group-has-[:focus-visible]/ws:op-100 group-has-[:focus-visible]/ws:pointer-events-auto"
+              >
+                <UiButton
+                  variant="ghost"
+                  size="icon"
+                  :label="t('workspace.openDefaultTerminal')"
+                  class="!h-6 !w-6 rounded-md text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-ui-text/8 [&:not(:disabled,[aria-disabled=true])]:hover:text-ui-text"
+                  :disabled="!machine.online || openingTerminal || workspace.directories.length === 0"
+                  @click="openTerminal(workspace)"
+                >
+                  <SquareTerminal :size="14" :stroke-width="1.75" aria-hidden="true" />
+                </UiButton>
+                <UiButton
+                  variant="ghost"
+                  size="icon"
+                  :label="t('workspace.newSession')"
+                  class="!h-6 !w-6 rounded-md text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-ui-text/8 [&:not(:disabled,[aria-disabled=true])]:hover:text-ui-text"
+                  :disabled="!machine.online"
+                  @click="startSession(workspace.id)"
+                >
+                  <SquarePen :size="14" :stroke-width="1.75" aria-hidden="true" />
+                </UiButton>
+              </div>
+              <CollapsibleTrigger
+                type="button"
+                tabindex="-1"
+                aria-hidden="true"
+                class="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-ui-text-faint ui-motion hover:bg-ui-text/8 hover:text-ui-text"
+              >
+                <ChevronRight :size="14" :stroke-width="1.75" class="ui-motion" :class="open && 'rotate-90'" aria-hidden="true" />
+              </CollapsibleTrigger>
+            </div>
+          </SidebarReorderRow>
+        </WorkspaceContextMenu>
+        <p v-if="terminalError?.workspaceId === workspace.id" role="alert" class="m-0 break-words px-2.5 text-xs text-ui-danger">{{ terminalError.message }}</p>
+        <CollapsibleContent as="ul" class="m-0 flex list-none flex-col gap-1 p-0 empty:hidden">
+          <template v-if="!filtering">
+            <li v-for="terminal in workspace.terminals" :key="terminal.id">
+              <TreeLink :machine-id="machine.id" :to="terminalLink(terminal.id)" :icon="SquareTerminal" :label="terminal.title" :depth="2" />
+            </li>
+          </template>
+          <SidebarReorderRow v-for="session in visibleOf(workspace.id, workspace.sessions)" :key="session.id" v-slot="{ source }" as="li" :group="sessionGroup(workspace.id)" :id="session.id" :items="workspace.unpinnedSessions">
+            <SessionContextMenu v-slot="{ requestArchive, pending }" :machine-id="machine.id" :session-id="session.id" :title="session.title ?? ''" :context="session.context" :archive-state="session.archiveState" :disabled="!machine.online">
+              <!-- A Session's shells open in its bottom panel, not the sidebar. -->
+              <SessionHoverTooltip :machine-id="machine.id" :session-id="session.id" :title="sessionLabel(session)" :machine-name="machine.name" :online="machine.online" :context="session.context">
+                <TreeLink :machine-id="machine.id" :to="{ name: 'session', params: { sessionId: session.id } }" :label="sessionLabel(session)" :depth="2" :drag-source="source">
+                  <template #trailing>
+                    <SessionPullRequestIndicators :machine-id="machine.id" :session-id="session.id" />
+                    <SessionWorkingIndicator v-if="sessionIndicator(session)" :state="sessionIndicator(session)" />
+                    <SessionUnreadIndicator v-else-if="sessionIsUnread(session)" />
+                  </template>
+                  <template v-if="session.archiveState === 'active' || session.archiveState === 'archiving'" #actions>
+                    <UiButton
+                      variant="ghost"
+                      size="icon"
+                      class="!h-6 !w-6 rounded-md text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-ui-text/8 [&:not(:disabled,[aria-disabled=true])]:hover:text-ui-text [&:not(:disabled,[aria-disabled=true])]:active:bg-ui-text/14"
+                      :label="t(session.archiveState === 'archiving' ? 'agent.retryArchive' : 'agent.archive')"
+                      :disabled="!machine.online || pending || !session.context"
+                      @click="requestArchive()"
+                    >
+                      <Archive :size="14" :stroke-width="1.75" aria-hidden="true" />
                     </UiButton>
                   </template>
                 </TreeLink>
@@ -626,43 +758,76 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
             </SessionContextMenu>
           </SidebarReorderRow>
           <li v-if="workspace.sessions.length > MAX_VISIBLE_SESSIONS">
-            <button type="button" class="ui-nav-item w-full pl-6 pr-2.5 text-left text-xs text-ui-text-faint hover:text-ui-text" @click="toggleGroup(workspace.id)">
+            <button type="button" class="ui-nav-item w-full pl-[41px] pr-2.5 text-left text-xs text-ui-text-faint hover:text-ui-text" @click="toggleGroup(workspace.id)">
               {{ expandedGroups.has(workspace.id) ? t('sidebar.showFewerSessions') : t('sidebar.showMoreSessions', { count: workspace.sessions.length - MAX_VISIBLE_SESSIONS }) }}
             </button>
           </li>
         </CollapsibleContent>
       </CollapsibleRoot>
-      <li v-if="revealedHiddenWorkspaces.length" data-hidden-workspaces-header class="mt-1.5 flex items-center gap-1.5 px-2.5 pt-1 text-[11px] font-medium text-ui-text-faint">
+      <li v-if="revealedHiddenWorkspaces.length" data-hidden-workspaces-header class="mt-1.5 flex items-center gap-1.5 pl-4 pr-2.5 pt-1 text-[11px] font-medium text-ui-text-faint">
         <EyeOff :size="12" aria-hidden="true" />
         <span>{{ t("workspace.hiddenSection") }}</span>
       </li>
       <CollapsibleRoot v-for="workspace in revealedHiddenWorkspaces" :key="workspace.id" v-slot="{ open }" as="li" :data-workspace-id="workspace.id" data-workspace-hidden="true" :default-open="false" class="flex flex-col gap-1">
         <WorkspaceContextMenu :workspace-id="workspace.id" :machine-id="machine.id" :name="workspace.name" :directories="workspace.directories" :disabled="!machine.online || !fleet.canManageCatalog">
-          <div class="workspace-row ui-nav-item relative border border-dashed border-ui-border-strong/70 opacity-75 hover:opacity-100">
-            <CollapsibleTrigger type="button" :aria-label="workspace.name" class="relative flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2.5 pl-2.5 pr-1 text-left text-ui-text-muted">
-              <EyeOff :size="15" :stroke-width="1.75" class="workspace-folder-icon shrink-0 text-ui-text-faint" aria-hidden="true" />
-              <ChevronRight :size="15" :stroke-width="1.75" class="workspace-collapse-icon absolute left-2.5 shrink-0" :class="open && 'rotate-90'" aria-hidden="true" />
-              <span class="truncate">{{ workspace.name }}</span>
+          <div class="workspace-row group/ws flex h-8 items-center rounded-lg border border-dashed border-ui-border-strong/70 pl-4 pr-1 opacity-75 ui-motion hover:bg-ui-hover hover:opacity-100">
+            <CollapsibleTrigger
+              type="button"
+              :aria-label="workspace.name"
+              class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2.5 pr-1 text-left text-[13px] text-ui-text-muted ui-motion"
+            >
+              <EyeOff :size="15" :stroke-width="1.75" class="shrink-0 text-ui-text-faint" aria-hidden="true" />
+              <span class="min-w-0 flex-1 truncate">{{ workspace.name }}</span>
               <span data-workspace-hidden-badge class="ui-badge shrink-0">{{ t("workspace.hiddenBadge") }}</span>
               <SessionWorkingIndicator v-if="!open && sessionsIndicator(workspace.sessions)" :state="sessionsIndicator(workspace.sessions)" />
             </CollapsibleTrigger>
-            <div class="workspace-actions flex shrink-0 items-center pr-1">
-              <UiButton variant="ghost" size="icon" :label="t('workspace.openDefaultTerminal')" class="text-inherit enabled:hover:bg-transparent enabled:hover:text-inherit" :disabled="!machine.online || openingTerminal || workspace.directories.length === 0" @click="openTerminal(workspace)"><SquareTerminal :size="16" :stroke-width="1.75" aria-hidden="true" /></UiButton>
-              <UiButton variant="ghost" size="icon" :label="t('workspace.newSession')" class="text-inherit enabled:hover:bg-transparent enabled:hover:text-inherit" :disabled="!machine.online" @click="startSession(workspace.id)"><SquarePen :size="16" :stroke-width="1.75" aria-hidden="true" /></UiButton>
+            <div class="flex shrink-0 items-center gap-0.5">
+              <div
+                class="flex shrink-0 items-center gap-0.5 text-ui-text-faint ui-motion can-hover:max-w-0 can-hover:overflow-hidden can-hover:op-0 can-hover:pointer-events-none group-hover/ws:max-w-14 group-hover/ws:op-100 group-hover/ws:pointer-events-auto group-has-[:focus-visible]/ws:max-w-14 group-has-[:focus-visible]/ws:op-100 group-has-[:focus-visible]/ws:pointer-events-auto"
+              >
+                <UiButton
+                  variant="ghost"
+                  size="icon"
+                  :label="t('workspace.openDefaultTerminal')"
+                  class="!h-6 !w-6 rounded-md text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-ui-text/8 [&:not(:disabled,[aria-disabled=true])]:hover:text-ui-text"
+                  :disabled="!machine.online || openingTerminal || workspace.directories.length === 0"
+                  @click="openTerminal(workspace)"
+                >
+                  <SquareTerminal :size="14" :stroke-width="1.75" aria-hidden="true" />
+                </UiButton>
+                <UiButton
+                  variant="ghost"
+                  size="icon"
+                  :label="t('workspace.newSession')"
+                  class="!h-6 !w-6 rounded-md text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-ui-text/8 [&:not(:disabled,[aria-disabled=true])]:hover:text-ui-text"
+                  :disabled="!machine.online"
+                  @click="startSession(workspace.id)"
+                >
+                  <SquarePen :size="14" :stroke-width="1.75" aria-hidden="true" />
+                </UiButton>
+              </div>
+              <CollapsibleTrigger
+                type="button"
+                tabindex="-1"
+                aria-hidden="true"
+                class="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-ui-text-faint ui-motion hover:bg-ui-text/8 hover:text-ui-text"
+              >
+                <ChevronRight :size="14" :stroke-width="1.75" class="ui-motion" :class="open && 'rotate-90'" aria-hidden="true" />
+              </CollapsibleTrigger>
             </div>
           </div>
         </WorkspaceContextMenu>
         <p v-if="terminalError?.workspaceId === workspace.id" role="alert" class="m-0 break-words px-2.5 text-xs text-ui-danger">{{ terminalError.message }}</p>
-        <CollapsibleContent as="ul" class="flex flex-col gap-1 empty:hidden">
+        <CollapsibleContent as="ul" class="m-0 flex list-none flex-col gap-1 p-0 empty:hidden">
           <template v-if="!filtering">
             <li v-for="terminal in workspace.terminals" :key="terminal.id">
-              <TreeLink :machine-id="machine.id" :to="terminalLink(terminal.id)" :icon="SquareTerminal" :label="terminal.title" :depth="1" />
+              <TreeLink :machine-id="machine.id" :to="terminalLink(terminal.id)" :icon="SquareTerminal" :label="terminal.title" :depth="2" />
             </li>
           </template>
-          <SidebarReorderRow v-for="session in visibleOf(workspace.id, workspace.sessions)" :key="session.id" v-slot="{ source }" as="li" :group="sessionGroup(workspace.id)" :id="session.id" :items="workspace.allSessions">
+          <SidebarReorderRow v-for="session in visibleOf(workspace.id, workspace.sessions)" :key="session.id" v-slot="{ source }" as="li" :group="sessionGroup(workspace.id)" :id="session.id" :items="workspace.unpinnedSessions">
             <SessionContextMenu v-slot="{ requestArchive, pending }" :machine-id="machine.id" :session-id="session.id" :title="session.title ?? ''" :context="session.context" :archive-state="session.archiveState" :disabled="!machine.online">
               <SessionHoverTooltip :machine-id="machine.id" :session-id="session.id" :title="sessionLabel(session)" :machine-name="machine.name" :online="machine.online" :context="session.context">
-                <TreeLink :machine-id="machine.id" :to="{ name: 'session', params: { sessionId: session.id } }" :label="sessionLabel(session)" :depth="1" :drag-source="source">
+                <TreeLink :machine-id="machine.id" :to="{ name: 'session', params: { sessionId: session.id } }" :label="sessionLabel(session)" :depth="2" :drag-source="source">
                   <template #trailing>
                     <SessionPullRequestIndicators :machine-id="machine.id" :session-id="session.id" />
                     <SessionWorkingIndicator v-if="sessionIndicator(session)" :state="sessionIndicator(session)" />
@@ -672,12 +837,12 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
                     <UiButton
                       variant="ghost"
                       size="icon"
-                      class="text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-current/15 [&:not(:disabled,[aria-disabled=true])]:hover:text-current [&:not(:disabled,[aria-disabled=true])]:active:bg-current/20"
+                      class="!h-6 !w-6 rounded-md text-current [&:not(:disabled,[aria-disabled=true])]:hover:bg-ui-text/8 [&:not(:disabled,[aria-disabled=true])]:hover:text-ui-text [&:not(:disabled,[aria-disabled=true])]:active:bg-ui-text/14"
                       :label="t(session.archiveState === 'archiving' ? 'agent.retryArchive' : 'agent.archive')"
                       :disabled="!machine.online || pending || !session.context"
                       @click="requestArchive()"
                     >
-                      <Archive :size="16" :stroke-width="1.75" aria-hidden="true" />
+                      <Archive :size="14" :stroke-width="1.75" aria-hidden="true" />
                     </UiButton>
                   </template>
                 </TreeLink>
@@ -685,7 +850,7 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
             </SessionContextMenu>
           </SidebarReorderRow>
           <li v-if="workspace.sessions.length > MAX_VISIBLE_SESSIONS">
-            <button type="button" class="ui-nav-item w-full pl-6 pr-2.5 text-left text-xs text-ui-text-faint hover:text-ui-text" @click="toggleGroup(workspace.id)">
+            <button type="button" class="ui-nav-item w-full pl-[41px] pr-2.5 text-left text-xs text-ui-text-faint hover:text-ui-text" @click="toggleGroup(workspace.id)">
               {{ expandedGroups.has(workspace.id) ? t('sidebar.showFewerSessions') : t('sidebar.showMoreSessions', { count: workspace.sessions.length - MAX_VISIBLE_SESSIONS }) }}
             </button>
           </li>
@@ -697,23 +862,13 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
 </template>
 
 <style scoped>
-.workspace-folder-icon,
-.workspace-collapse-icon,
-.workspace-actions {
+[data-project-workspace] .workspace-actions {
+  opacity: 0;
+  pointer-events: none;
   transition: opacity var(--ui-duration-instant) var(--ui-ease-out), transform var(--ui-duration-instant) var(--ui-ease-out);
 }
 
-.workspace-collapse-icon,
-.workspace-actions {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.workspace-row:is(:hover, :has(:focus-visible)) .workspace-folder-icon {
-  opacity: 0;
-}
-
-.workspace-row:is(:hover, :has(:focus-visible)) :is(.workspace-collapse-icon, .workspace-actions) {
+[data-project-workspace] .workspace-row:is(:hover, :has(:focus-visible)) .workspace-actions {
   opacity: 1;
   pointer-events: auto;
 }
@@ -726,9 +881,7 @@ const machineSummaryUnknown = computed(() => Boolean(projectHome.value && saSide
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .workspace-folder-icon,
-  .workspace-collapse-icon,
-  .workspace-actions {
+  [data-project-workspace] .workspace-actions {
     transition: none;
   }
 }

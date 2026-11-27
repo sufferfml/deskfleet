@@ -8,7 +8,7 @@ export type ToolInvoker = (name: string, args: Record<string, unknown>) => Promi
 
 export function createMcpServer(invoke: ToolInvoker, options: { enableSaReport?: boolean } = {}): Server {
   const available = options.enableSaReport ? [...DESKFLEET_TOOLS, ...DESKFLEET_SA_WORKER_TOOLS] : DESKFLEET_TOOLS
-  const server = new Server({ name: "deskfleet", title: "DeskFleet", version: "0.23.0" }, { capabilities: { tools: {} } })
+  const server = new Server({ name: "deskfleet", title: "DeskFleet", version: "0.24.0" }, { capabilities: { tools: {} } })
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: available.map(({ method: _method, ...tool }) => tool),
   }))
