@@ -2,7 +2,7 @@
 import { Archive, ArrowDown, ArrowRight, ChevronDown, ChevronRight, ClipboardList, CornerUpLeft, Focus, Folder, MapPin, MessagesSquare, X } from "@lucide/vue"
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from "reka-ui"
 import { useDocumentVisibility, useOnline, useResizeObserver, useTimeoutFn } from "@vueuse/core"
-import { computed, nextTick, onBeforeUnmount, ref, useTemplateRef, watch } from "vue"
+import { computed, nextTick, onBeforeUnmount, ref, useTemplateRef, watch, type FunctionalComponent } from "vue"
 import { useI18n } from "vue-i18n"
 import { RouterLink, useRoute, useRouter } from "vue-router"
 import type { GithubRepositoryItem } from "@deskfleet/client/central"
@@ -26,6 +26,7 @@ import UiButton from "../components/common/UiButton.vue"
 import UiDialog from "../components/common/UiDialog.vue"
 import ProjectModelMenu from "../components/composer/ProjectModelMenu.vue"
 import SessionComposer from "../components/composer/SessionComposer.vue"
+import WorkspaceArchivedSegment from "../components/session/WorkspaceArchivedSegment.vue"
 import WorkspaceProgressDetails from "../components/session/WorkspaceProgressDetails.vue"
 import WorkspaceReEditBanner from "../components/session/WorkspaceReEditBanner.vue"
 import WorkspaceReplyProgress from "../components/session/WorkspaceReplyProgress.vue"
@@ -41,7 +42,7 @@ import { useConnectionResume } from "../composables/useConnectionResume.ts"
 import { useWorkspaceAgentDisplayName } from "../composables/useWorkspaceAgentDisplayName.ts"
 import { useWorkspaceAgentSummary } from "../composables/useWorkspaceAgentSummary.ts"
 import { useWorkspaceConversation } from "../composables/useWorkspaceConversation.ts"
-import { buildWorkspaceTranscript, filterFeedbackForFocusedTicket, filterProgressForFocusedTicket, filterWorkspaceRowsByTicket, hasTicketStatus, indexWorkspaceTranscriptLocateTargets, missingWorker, previousUserMessageId, resolveWorkspaceStoppedTurns, stoppableSteps, workerSummary, workspaceMessageRows, type TranscriptEntry, type WorkspaceLocateTarget, type WorkspaceReplyProgress as ReplyProgress, type WorkspaceRow } from "../services/workspace-message-timeline.ts"
+import { buildWorkspaceTranscript, filterFeedbackForFocusedTicket, filterProgressForFocusedTicket, filterWorkspaceRowsByTicket, hasTicketStatus, indexWorkspaceTranscriptLocateTargets, missingWorker, previousUserMessageId, resolveWorkspaceStoppedTurns, stoppableSteps, workerSummary, workspaceMessageRows, type ArchivedSegmentEntry, type InnerTranscriptEntry, type WorkspaceLocateTarget, type WorkspaceReplyProgress as ReplyProgress, type WorkspaceRow } from "../services/workspace-message-timeline.ts"
 import { workspaceAgentRoute, workspaceSessionRoute } from "../services/workspace-agent-navigation.ts"
 import { useAgentSessionsStore } from "../stores/agent-sessions.ts"
 import { useFleetStore } from "../stores/fleet.ts"
@@ -421,11 +422,48 @@ function composerStop() {
   if (stopChoices.value.length === 1) void stop(stopChoices.value[0]!)
   else choosingStop.value = stopChoices.value.length > 1
 }
+const TranscriptPassthrough: FunctionalComponent = (_, { slots }) => slots.default?.()
 const stoppedTurns = computed(() => resolveWorkspaceStoppedTurns(messages.value, rows.value, tickets.value, localStops.value))
-const transcriptEntries = computed(() => buildWorkspaceTranscript(displayedRows.value, stoppedTurns.value, manuallyFoldedIds.value))
+const allArchivedSegmentIds = computed(() => {
+  const ids = new Set<string>()
+  for (const entry of buildWorkspaceTranscript(rows.value, stoppedTurns.value, manuallyFoldedIds.value, { foldArchived: true })) {
+    if (entry.kind === "archivedSegment") ids.add(entry.id)
+  }
+  return ids
+})
+const transcriptEntries = computed(() =>
+  buildWorkspaceTranscript(displayedRows.value, stoppedTurns.value, manuallyFoldedIds.value, { foldArchived: !focusedTicket.value }),
+)
 const locateTargets = computed(() => indexWorkspaceTranscriptLocateTargets(transcriptEntries.value))
 const expandedApprovals = ref(new Set<string>())
 const expandedSupersededTurns = ref(new Set<string>())
+const expandedArchivedSegments = ref(new Set<string>())
+let suppressAutoFollow = false
+watch(allArchivedSegmentIds, validIds => {
+  for (const id of [...expandedArchivedSegments.value]) {
+    if (!validIds.has(id)) expandedArchivedSegments.value.delete(id)
+  }
+})
+interface TranscriptSection {
+  key: string
+  archived?: ArchivedSegmentEntry
+  entries: readonly InnerTranscriptEntry[]
+}
+const transcriptSections = computed<TranscriptSection[]>(() =>
+  transcriptEntries.value.map(entry => {
+    if (entry.kind === "archivedSegment") {
+      return {
+        key: `archived:${entry.id}`,
+        archived: entry,
+        entries: expandedArchivedSegments.value.has(entry.id) ? entry.entries : [],
+      }
+    }
+    return {
+      key: entry.kind === "foldedStoppedTurn" ? `folded:${entry.id}` : entry.id,
+      entries: [entry],
+    }
+  }),
+)
 const confirmingReEdit = ref<SuperMessage>()
 const confirmingAbandonReEdit = ref(false)
 let reEditPreviewToken = 0
@@ -448,17 +486,32 @@ function stoppedActionSourceForWorkerResult(message: SuperMessage): string | und
   if (!meta || meta.supersededById) return undefined
   return meta.actionAnchor.kind === "workerResult" && meta.actionAnchor.messageId === message.id ? meta.sourceMessageId : undefined
 }
-function entryGroups(entry: TranscriptEntry) {
+function entryGroups(entry: InnerTranscriptEntry) {
   if (entry.kind === "group") return [entry.group]
   return entry.reason === "superseded" && expandedSupersededTurns.value.has(entry.id) ? entry.groups : []
 }
-function toggleFoldedStoppedTurn(entry: Extract<TranscriptEntry, { kind: "foldedStoppedTurn" }>) {
+function toggleFoldedStoppedTurn(entry: Extract<InnerTranscriptEntry, { kind: "foldedStoppedTurn" }>) {
   if (entry.reason === "manual") {
     unfoldStoppedTurn(entry.id)
     return
   }
   if (expandedSupersededTurns.value.has(entry.id)) expandedSupersededTurns.value.delete(entry.id)
   else expandedSupersededTurns.value.add(entry.id)
+}
+function toggleArchivedSegment(id: string) {
+  if (expandedArchivedSegments.value.has(id)) {
+    expandedArchivedSegments.value.delete(id)
+    return
+  }
+  suppressAutoFollow = true
+  expandedArchivedSegments.value.add(id)
+  void nextTick(() => {
+    suppressAutoFollow = false
+    const el = viewport.value
+    if (el && el.scrollHeight - el.scrollTop - el.clientHeight > 100) {
+      stickToBottom.value = false
+    }
+  })
 }
 function enterReEdit(source: SuperMessage, stashCurrent: boolean) {
   beginReEdit(source, { stashCurrent })
@@ -616,6 +669,7 @@ function rebindReadObserver(): void {
 watch(attachmentScope, () => {
   expandedApprovals.value.clear()
   expandedSupersededTurns.value.clear()
+  expandedArchivedSegments.value.clear()
   confirmingReEdit.value = undefined
   confirmingAbandonReEdit.value = false
   reEditPreviewToken++
@@ -744,13 +798,15 @@ const correctionChoices = computed(() => {
 })
 const outline = computed(() => {
   const items = new Map<string, { id: string; label: string; reply?: string }>()
-  for (const entry of transcriptEntries.value) {
-    for (const group of entryGroups(entry)) {
-      for (const { message } of group.rows) {
-        if (message.role === "user") items.set(message.id, { id: message.id, label: quoteText(message) ?? "" })
-        else if (message.sourceMessageId && message.text && message.workerEvent !== "permission") {
-          const item = items.get(message.sourceMessageId)
-          if (item) item.reply = message.text
+  for (const section of transcriptSections.value) {
+    for (const entry of section.entries) {
+      for (const group of entryGroups(entry)) {
+        for (const { message } of group.rows) {
+          if (message.role === "user") items.set(message.id, { id: message.id, label: quoteText(message) ?? "" })
+          else if (message.sourceMessageId && message.text && message.workerEvent !== "permission") {
+            const item = items.get(message.sourceMessageId)
+            if (item) item.reply = message.text
+          }
         }
       }
     }
@@ -761,7 +817,20 @@ function sourceForOutline(message?: SuperMessage) {
   if (message?.role === "user") return message.id
   if (message?.sourceMessageId && byId.value.get(message.sourceMessageId)?.role === "user") return message.sourceMessageId
 }
-const lastOutlineEntry = computed(() => sourceForOutline(displayedRows.value.findLast(row => sourceForOutline(row.message))?.message))
+const lastOutlineEntry = computed(() => {
+  let latest: string | undefined
+  for (const section of transcriptSections.value) {
+    for (const entry of section.entries) {
+      for (const group of entryGroups(entry)) {
+        for (const { message } of group.rows) {
+          const source = sourceForOutline(message)
+          if (source) latest = source
+        }
+      }
+    }
+  }
+  return latest
+})
 function entries() {
   return Array.from(transcript.value?.querySelectorAll<HTMLElement>("[data-outline-source]") ?? [])
 }
@@ -888,6 +957,9 @@ async function locateMessage(id: string): Promise<boolean> {
   const target = locateTargets.value.get(id)
   if (!target) return false
   const token = ++locateToken
+  if (target.archivedSegmentId) {
+    expandedArchivedSegments.value.add(target.archivedSegmentId)
+  }
   if (target.foldedTurnId) {
     if (target.foldedTurnReason === "manual") unfoldStoppedTurn(target.foldedTurnId)
     else expandedSupersededTurns.value.add(target.foldedTurnId)
@@ -929,6 +1001,7 @@ function scrollToBottom() {
   void animation.finished.then(() => { if (spring === animation) { spring = undefined; followScroll() } })
 }
 function followNewContent() {
+  if (suppressAutoFollow) return
   if (snapshot.value && !focusedTicket.value && !restoringFocusScroll.value && stickToBottom.value && viewport.value && !spring) {
     viewport.value.scrollTop = viewport.value.scrollHeight
     activeEntry.value = lastOutlineEntry.value
@@ -1317,7 +1390,19 @@ function feedbackGroupAccentSlot(row: WorkspaceRow): number | undefined {
           <UiButton type="button" size="sm" variant="ghost" @click="exitTicketFocus(true)">{{ t('superAgent.showAll') }}</UiButton>
         </div>
         <ol v-else class="flex flex-col gap-6 text-[15px] leading-[1.65]" :aria-label="t('agent.conversation')">
-          <template v-for="entry in transcriptEntries" :key="entry.kind === 'foldedStoppedTurn' ? `folded:${entry.id}` : entry.id">
+          <template v-for="section in transcriptSections" :key="section.key">
+            <component
+              :is="section.archived ? WorkspaceArchivedSegment : TranscriptPassthrough"
+              v-bind="section.archived ? {
+                segmentId: section.archived.id,
+                tickets: section.archived.tickets,
+                messageCount: section.archived.rows.length,
+                expanded: expandedArchivedSegments.has(section.archived.id),
+                touch: touchWorkspace,
+                onToggle: toggleArchivedSegment,
+              } : {}"
+            >
+              <template v-for="entry in section.entries" :key="entry.kind === 'foldedStoppedTurn' ? `folded:${entry.id}` : entry.id">
             <li
               v-if="entry.kind === 'foldedStoppedTurn'"
               :data-folded-stopped-turn="entry.id"
@@ -1699,8 +1784,10 @@ function feedbackGroupAccentSlot(row: WorkspaceRow): number | undefined {
                 :on-load="loadProcess"
               />
             </li>
-          </template>
-          </template>
+              </template>
+              </template>
+              </template>
+            </component>
           </template>
         </ol>
       </div>

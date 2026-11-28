@@ -206,6 +206,13 @@
     "restoreTicket": "恢复事项",
     "archivedTickets": "已归档（{count}）",
     "archivingTicket": "正在归档…",
+    "archivedFold": {
+      "badge": "已归档",
+      "messageCount": "{count} 条消息",
+      "expand": "展开",
+      "collapse": "收起",
+      "untitled": "未命名事项"
+    },
     "archiveUnbound": "归档这个事项？对话记录会保留，恢复后可以继续处理。",
     "restoreUnbound": "将这个事项恢复到事项列表？再次发消息后才会继续执行。",
     "archiveUnavailable": "请连接工作区，稍后重试。",

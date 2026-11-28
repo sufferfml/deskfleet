@@ -156,7 +156,7 @@ export interface StoppedTurnMeta {
   actionAnchor: { kind: "progress" | "workerResult"; messageId: string }
 }
 
-export type TranscriptEntry =
+export type InnerTranscriptEntry =
   | { kind: "group"; id: string; group: TranscriptGroup }
   | {
       kind: "foldedStoppedTurn"
@@ -167,9 +167,39 @@ export type TranscriptEntry =
       groups: TranscriptGroup[]
     }
 
+export interface ArchivedSegmentEntry {
+  kind: "archivedSegment"
+  /** Stable segment ID derived from the canonical archived ticket key and first message ID in this run. */
+  id: string
+  /** Canonical ticket fold key (single ticket ID or sorted multi-ticket ID tuple). */
+  ticketKey: string
+  /** Archived tickets associated with every row in this contiguous run. */
+  tickets: SuperTicket[]
+  /** Contiguous conversation rows belonging strictly to these archived ticket(s). */
+  rows: WorkspaceRow[]
+  /** Inner rendered transcript entries preserving approval groups and folded stopped turns on expand. */
+  entries: InnerTranscriptEntry[]
+}
+
+export type TranscriptEntry = InnerTranscriptEntry | ArchivedSegmentEntry
+
 export type WorkspaceLocateTarget =
-  | { kind: "message"; id: string; approvalGroupId?: string; foldedTurnId?: string; foldedTurnReason?: "superseded" | "manual" }
-  | { kind: "feedback"; id: string; feedbackKind: "ack" | "milestone"; foldedTurnId?: string; foldedTurnReason?: "superseded" | "manual" }
+  | {
+      kind: "message"
+      id: string
+      approvalGroupId?: string
+      foldedTurnId?: string
+      foldedTurnReason?: "superseded" | "manual"
+      archivedSegmentId?: string
+    }
+  | {
+      kind: "feedback"
+      id: string
+      feedbackKind: "ack" | "milestone"
+      foldedTurnId?: string
+      foldedTurnReason?: "superseded" | "manual"
+      archivedSegmentId?: string
+    }
 
 /**
  * Identify confirmed-stopped user turns, their explicit re-edit superseding message (if any),
@@ -225,14 +255,25 @@ function rowTurnId(row: WorkspaceRow): string | undefined {
 }
 
 /**
- * Fold superseded or manually-collapsed stopped turns strictly by real `sourceMessageId`
- * association, preserving interleaved unrelated turns in place without swallowing them.
+ * Return the canonical archived fold key for a row strictly from its actual ticket associations.
+ * - Unassociated rows (`linkedTickets.length === 0`) return `undefined` (never guessed from adjacency).
+ * - Rows linked to any non-archived ticket (active or `archiving`) return `undefined`.
+ * - Single-ticket archived rows key on that ticket ID; multi-ticket rows where every linked ticket
+ *   is archived key on their sorted canonical ticket ID tuple so distinct tickets never merge.
  */
-export function buildWorkspaceTranscript(
+export function archivedRowFoldKey(row: Pick<WorkspaceRow, "linkedTickets">): string | undefined {
+  if (!row.linkedTickets.length) return undefined
+  if (!row.linkedTickets.every(ticket => ticket.archiveState === "archived")) return undefined
+  if (row.linkedTickets.length === 1) return row.linkedTickets[0]!.id
+  const ids = [...new Set(row.linkedTickets.map(ticket => ticket.id))].sort()
+  return JSON.stringify(ids)
+}
+
+function buildInnerTranscript(
   displayedRows: readonly WorkspaceRow[],
   stoppedTurns: ReadonlyMap<string, StoppedTurnMeta>,
   manuallyFoldedIds: ReadonlySet<string>,
-): TranscriptEntry[] {
+): InnerTranscriptEntry[] {
   const foldedMeta = new Map<string, { reason: "superseded" | "manual"; revisedById?: string }>()
   for (const [turnId, meta] of stoppedTurns) {
     if (meta.supersededById) {
@@ -261,7 +302,7 @@ export function buildWorkspaceTranscript(
     for (const row of group.rows) groupByMessageId.set(row.message.id, group)
   }
 
-  const entries: TranscriptEntry[] = []
+  const entries: InnerTranscriptEntry[] = []
   const emittedFolded = new Set<string>()
   const emittedGroups = new Set<string>()
   for (const row of displayedRows) {
@@ -289,12 +330,92 @@ export function buildWorkspaceTranscript(
   return entries
 }
 
+/**
+ * Build rendered SA transcript entries:
+ * - Folds contiguous runs of rows strictly belonging to archived ticket(s) into one-line
+ *   `archivedSegment` entries (when `foldArchived` is enabled), keeping interleaved unrelated
+ *   or active-ticket rows in place and splitting surrounding archived segments cleanly.
+ * - Folds superseded or manually-collapsed stopped turns strictly by real `sourceMessageId`
+ *   association, preserving interleaved unrelated turns in place without swallowing them.
+ */
+export function buildWorkspaceTranscript(
+  displayedRows: readonly WorkspaceRow[],
+  stoppedTurns: ReadonlyMap<string, StoppedTurnMeta>,
+  manuallyFoldedIds: ReadonlySet<string>,
+  options: { foldArchived?: boolean } = {},
+): TranscriptEntry[] {
+  const foldArchived = options.foldArchived ?? true
+  if (!foldArchived) {
+    return buildInnerTranscript(displayedRows, stoppedTurns, manuallyFoldedIds)
+  }
+
+  type TimelineRun =
+    | { archived: true; ticketKey: string; tickets: SuperTicket[]; rows: WorkspaceRow[] }
+    | { archived: false; rows: WorkspaceRow[] }
+
+  const runs: TimelineRun[] = []
+  const unarchivedRows: WorkspaceRow[] = []
+  for (const row of displayedRows) {
+    const key = archivedRowFoldKey(row)
+    if (key) {
+      const previous = runs.at(-1)
+      if (previous?.archived && previous.ticketKey === key) {
+        previous.rows.push(row)
+      } else {
+        runs.push({ archived: true, ticketKey: key, tickets: [...row.linkedTickets], rows: [row] })
+      }
+      continue
+    }
+    unarchivedRows.push(row)
+    const previous = runs.at(-1)
+    if (previous && !previous.archived) {
+      previous.rows.push(row)
+    } else {
+      runs.push({ archived: false, rows: [row] })
+    }
+  }
+
+  const unarchivedEntries = buildInnerTranscript(unarchivedRows, stoppedTurns, manuallyFoldedIds)
+  const unarchivedEntryByMessageId = new Map<string, InnerTranscriptEntry>()
+  for (const entry of unarchivedEntries) {
+    const entryRows = entry.kind === "group" ? entry.group.rows : entry.rows
+    for (const row of entryRows) unarchivedEntryByMessageId.set(row.message.id, entry)
+  }
+
+  const entries: TranscriptEntry[] = []
+  const emittedUnarchived = new Set<InnerTranscriptEntry>()
+  for (const run of runs) {
+    if (run.archived) {
+      entries.push({
+        kind: "archivedSegment",
+        id: `${run.ticketKey}:${run.rows[0]!.message.id}`,
+        ticketKey: run.ticketKey,
+        tickets: run.tickets,
+        rows: run.rows,
+        entries: buildInnerTranscript(run.rows, stoppedTurns, manuallyFoldedIds),
+      })
+      continue
+    }
+    for (const row of run.rows) {
+      const entry = unarchivedEntryByMessageId.get(row.message.id)
+      if (!entry || emittedUnarchived.has(entry)) continue
+      emittedUnarchived.add(entry)
+      entries.push(entry)
+    }
+  }
+  return entries
+}
+
 function indexGroupLocateTargets(
   groups: readonly TranscriptGroup[],
   targets: Map<string, WorkspaceLocateTarget>,
   folded?: { id: string; reason: "superseded" | "manual" },
+  archivedSegmentId?: string,
 ): void {
-  const extra = folded ? { foldedTurnId: folded.id, foldedTurnReason: folded.reason } : {}
+  const extra = {
+    ...(folded ? { foldedTurnId: folded.id, foldedTurnReason: folded.reason } : {}),
+    ...(archivedSegmentId ? { archivedSegmentId } : {}),
+  }
   for (const group of groups) {
     const approvalGroupId = group.approvals ? group.id : undefined
     for (const row of group.rows) {
@@ -333,14 +454,28 @@ export function indexWorkspaceLocateTargets(groups: readonly TranscriptGroup[]):
   return targets
 }
 
-/** Map all rendered transcript entries (including folded stopped turns) to exact DOM locate targets. */
+function indexInnerTranscriptLocateTargets(
+  entries: readonly InnerTranscriptEntry[],
+  targets: Map<string, WorkspaceLocateTarget>,
+  archivedSegmentId?: string,
+): void {
+  for (const entry of entries) {
+    if (entry.kind === "group") {
+      indexGroupLocateTargets([entry.group], targets, undefined, archivedSegmentId)
+    } else {
+      indexGroupLocateTargets(entry.groups, targets, { id: entry.id, reason: entry.reason }, archivedSegmentId)
+    }
+  }
+}
+
+/** Map all rendered transcript entries (including folded archived segments and stopped turns) to exact DOM locate targets. */
 export function indexWorkspaceTranscriptLocateTargets(entries: readonly TranscriptEntry[]): Map<string, WorkspaceLocateTarget> {
   const targets = new Map<string, WorkspaceLocateTarget>()
   for (const entry of entries) {
-    if (entry.kind === "group") {
-      indexGroupLocateTargets([entry.group], targets)
+    if (entry.kind === "archivedSegment") {
+      indexInnerTranscriptLocateTargets(entry.entries, targets, entry.id)
     } else {
-      indexGroupLocateTargets(entry.groups, targets, { id: entry.id, reason: entry.reason })
+      indexInnerTranscriptLocateTargets([entry], targets)
     }
   }
   return targets

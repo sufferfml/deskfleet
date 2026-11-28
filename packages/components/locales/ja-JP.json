@@ -206,6 +206,13 @@
     "restoreTicket": "チケットを復元",
     "archivedTickets": "アーカイブ済み（{count}）",
     "archivingTicket": "アーカイブ中…",
+    "archivedFold": {
+      "badge": "アーカイブ済み",
+      "messageCount": "{count} 件のメッセージ",
+      "expand": "展開",
+      "collapse": "折りたたむ",
+      "untitled": "無題のチケット"
+    },
     "archiveUnbound": "このチケットをアーカイブしますか？会話履歴は保持され、復元後に作業を続けられます。",
     "restoreUnbound": "このチケットを一覧に戻しますか？次のメッセージを送ると作業を続けられます。",
     "archiveUnavailable": "ワークスペースに接続してからもう一度お試しください。",

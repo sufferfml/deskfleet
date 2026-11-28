@@ -978,20 +978,24 @@ test.each([false, true])("locates each ticket's latest displayed message without
   expect(api.archiveTicket).not.toHaveBeenCalled()
 })
 
-test("locating archived history reveals the latest message inside its collapsed approval group", async () => {
+test("locating archived history reveals the latest message inside its collapsed archived segment and approval group", async () => {
   const job = { ...ticket("Archive review"), archiveState: "archived" as const }
   const receipt = (id: string) => message(id, { role: "worker", ticketId: job.id, workerEvent: "permission", turnId: "1" })
   await setup(room({ tickets: [job], messages: [
     receipt("first-approval"), message("interleaved", { ticketId: job.id }), receipt("latest-approval"), message("other"),
   ] }))
-  const group = wrapper.get('[data-approval-history="first-approval"] button')
-  expect(group.attributes("aria-expanded")).toBe("false")
+  const archivedToggle = wrapper.get(`[data-archived-segment="${job.id}:first-approval"] [data-archived-segment-toggle]`)
+  expect(archivedToggle.attributes("aria-expanded")).toBe("false")
+  expect(wrapper.find('[data-approval-history="first-approval"]').exists()).toBe(false)
   expect(wrapper.find('[data-super-message="latest-approval"]').exists()).toBe(false)
+  expect(wrapper.find('[data-super-message="other"]').exists()).toBe(true)
   const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
   const panel = await openTicketList()
   await panel.get("summary").trigger("click")
   await locateButton(panel, job).trigger("click")
   await flushPromises()
+  expect(archivedToggle.attributes("aria-expanded")).toBe("true")
+  const group = wrapper.get('[data-approval-history="first-approval"] button')
   expect(group.attributes("aria-expanded")).toBe("true")
   const target = wrapper.get('[data-super-message="latest-approval"]')
   expect(scroll.mock.contexts).toContain(target.element)
@@ -1021,7 +1025,13 @@ test.each([false, true])("archives from ticket details and restores from an empt
   await flushPromises()
   expect(api.archiveTicket).toHaveBeenCalledExactlyOnceWith({ workspaceId: "A", ticketId: job.id, sessionId: "4", archived: true, operationId: expect.any(String) })
   expect(header.text()).toBe(i18n.global.t("superAgent.tickets", { count: 0 }))
+  const archivedToggle = wrapper.get(`[data-archived-segment="${job.id}:Original request"] [data-archived-segment-toggle]`)
+  expect(archivedToggle.attributes("aria-expanded")).toBe("false")
+  expect(wrapper.find('[data-super-message="Original request"]').exists()).toBe(false)
+  await archivedToggle.trigger("click")
+  await flushPromises()
   expect(wrapper.get('[data-super-message="Original request"]').text()).toContain("Original request")
+  expect(api.archiveTicket).toHaveBeenCalledTimes(1)
   const group = (await openTicketList()).get("details")
   expect(group.attributes("open")).toBeUndefined()
   expect(group.get("summary").text()).toBe(i18n.global.t("superAgent.archivedTickets", { count: 1 }))
@@ -1032,6 +1042,8 @@ test.each([false, true])("archives from ticket details and restores from an empt
   await flushPromises()
   expect(api.archiveTicket).toHaveBeenLastCalledWith({ workspaceId: "A", ticketId: job.id, sessionId: "4", archived: false, operationId: expect.any(String) })
   expect(header.text()).toBe(i18n.global.t("superAgent.tickets", { count: 1 }))
+  expect(wrapper.find(`[data-archived-segment="${job.id}:Original request"]`).exists()).toBe(false)
+  expect(wrapper.get('[data-super-message="Original request"]').text()).toContain("Original request")
   expect(api.send).not.toHaveBeenCalled()
 })
 

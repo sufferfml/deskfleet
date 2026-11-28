@@ -790,11 +790,23 @@ test("tickets menu colors only ticket title text in both active and expanded arc
     ],
   }))
 
-  // Capture conversation expandable toggle slots first (the source of truth).
+  // Archived tickets start collapsed with their matching accent slots on the collapsed bar;
+  // expanding them in place reveals their conversation toggles with the exact same slots.
+  const archColoredSeg = wrapper.get(`[data-archived-segment="${archivedColored.id}:u-arch-c"]`)
+  const archLegacySeg = wrapper.get(`[data-archived-segment="${archivedLegacy.id}:u-arch-l"]`)
+  const barSlotArchColored = archColoredSeg.attributes("data-sa-accent-slot")
+  const barSlotArchLegacy = archLegacySeg.attributes("data-sa-accent-slot")
+  await archColoredSeg.get("[data-archived-segment-toggle]").trigger("click")
+  await archLegacySeg.get("[data-archived-segment-toggle]").trigger("click")
+  await flushPromises()
+
+  // Capture conversation expandable toggle slots (the source of truth).
   const convSlotNew = wrapper.get('[data-super-message="a-new"] [data-execution-toggle]').attributes("data-sa-accent-slot")
   const convSlotLegacyActive = wrapper.get('[data-super-message="a-leg"] [data-execution-toggle]').attributes("data-sa-accent-slot")
   const convSlotArchColored = wrapper.get('[data-super-message="a-arch-c"] [data-execution-toggle]').attributes("data-sa-accent-slot")
   const convSlotArchLegacy = wrapper.get('[data-super-message="a-arch-l"] [data-execution-toggle]').attributes("data-sa-accent-slot")
+  expect(barSlotArchColored).toBe(convSlotArchColored)
+  expect(barSlotArchLegacy).toBe(convSlotArchLegacy)
 
   expect(convSlotNew).toBe("18")
   expect(convSlotArchColored).toBe("9")
